@@ -1,10 +1,10 @@
-name: LINE Test
+name: Market Data Test
 
 on:
   workflow_dispatch:
 
 jobs:
-  send-line:
+  market-data:
     runs-on: ubuntu-latest
 
     steps:
@@ -16,11 +16,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install requests
-        run: pip install requests
+      - name: Install packages
+        run: pip install requests beautifulsoup4
 
-      - name: Send LINE message
-        env:
-          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-        run: python send_line.py
+      - name: Fetch market data
+        run: python fetch_market_data.py
