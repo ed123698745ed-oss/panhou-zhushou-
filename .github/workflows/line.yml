@@ -2,10 +2,22 @@ name: Market Data Test
 
 on:
   workflow_dispatch:
+    inputs:
+      market_date:
+        description: "交易日 YYYY-MM-DD（留空使用台北今天）"
+        required: false
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
   market-data:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TZ: Asia/Taipei
+      MARKET_DATE: ${{ inputs.market_date }}
 
     steps:
       - name: Checkout repository
@@ -19,5 +31,14 @@ jobs:
       - name: Install packages
         run: pip install requests beautifulsoup4
 
+      - name: Validate market data parsers
+        run: python -m unittest discover -s tests -v
+
       - name: Fetch market data
-        run: python fetch_market_data.py
+        shell: bash
+        run: |
+          if [[ -n "$MARKET_DATE" ]]; then
+            python fetch_market_data.py --date "$MARKET_DATE"
+          else
+            python fetch_market_data.py
+          fi
