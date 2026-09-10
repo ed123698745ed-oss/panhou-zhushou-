@@ -6,7 +6,6 @@ TAIFEX_URL = "https://www.taifex.com.tw/cht/3/futContractsDateExcel"
 TWSE_INDEX_URL = "https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX"
 TWSE_TURNOVER_URL = "https://openapi.twse.com.tw/v1/exchangeReport/FMTQIK"
 
-
 HEADERS = {
     "User-Agent": "Mozilla/5.0"
 }
@@ -31,12 +30,17 @@ def clean_float(text):
     )
 
 
+# =========================
+# 加權指數
+# =========================
 def get_twse_index():
+
     response = requests.get(
         TWSE_INDEX_URL,
         headers=HEADERS,
         timeout=20
     )
+
     response.raise_for_status()
 
     data = response.json()
@@ -44,6 +48,7 @@ def get_twse_index():
     target = None
 
     for row in data:
+
         name = (
             row.get("指數", "")
             or row.get("指數名稱", "")
@@ -61,13 +66,12 @@ def get_twse_index():
     change = None
     change_percent = None
 
+    # 收盤指數
     for key, value in target.items():
 
-        if "收盤" in key or "指數" == key:
+        if "收盤" in key:
             try:
-                number = clean_float(value)
-                if number > 10000:
-                    index_value = number
+                index_value = clean_float(value)
             except:
                 pass
 
@@ -83,25 +87,38 @@ def get_twse_index():
             except:
                 pass
 
+    # 備援判斷
     if index_value is None:
+
         for value in target.values():
+
             try:
                 number = clean_float(value)
+
                 if 10000 < number < 100000:
                     index_value = number
                     break
+
             except:
                 pass
+
+    if index_value is None:
+        raise RuntimeError("無法解析加權指數")
 
     return index_value, change, change_percent
 
 
+# =========================
+# 台股成交金額
+# =========================
 def get_twse_turnover():
+
     response = requests.get(
         TWSE_TURNOVER_URL,
         headers=HEADERS,
         timeout=20
     )
+
     response.raise_for_status()
 
     data = response.json()
@@ -111,34 +128,37 @@ def get_twse_turnover():
 
     latest = data[-1]
 
-    turnover = None
+    if "TradeValue" not in latest:
+        raise RuntimeError(
+            f"找不到 TradeValue，實際欄位：{list(latest.keys())}"
+        )
 
-    for key, value in latest.items():
-        if "成交金額" in key:
-            try:
-                turnover = clean_int(value)
-                break
-            except:
-                pass
+    turnover = clean_int(latest["TradeValue"])
 
-    if turnover is None:
-        raise RuntimeError("無法解析成交金額")
-
+    # 元 → 億元
     turnover_yi = turnover / 100000000
 
     return turnover_yi
 
 
+# =========================
+# 外資台指期淨未平倉
+# =========================
 def get_foreign_tx_oi():
+
     response = requests.get(
         TAIFEX_URL,
-        timeout=20,
-        headers=HEADERS
+        headers=HEADERS,
+        timeout=20
     )
 
     response.raise_for_status()
 
-    soup = BeautifulSoup(response.text, "html.parser")
+    soup = BeautifulSoup(
+        response.text,
+        "html.parser"
+    )
+
     rows = soup.find_all("tr")
 
     for i, row in enumerate(rows):
@@ -162,20 +182,35 @@ def get_foreign_tx_oi():
                     numbers = []
 
                     for value in next_cells:
+
                         try:
-                            numbers.append(clean_int(value))
+                            numbers.append(
+                                clean_int(value)
+                            )
+
                         except:
                             pass
 
                     if len(numbers) < 2:
                         continue
 
+                    # 倒數第 2 個數字
+                    # = 未平倉多空淨額口數
                     return numbers[-2]
 
-    raise RuntimeError("找不到臺股期貨外資資料")
+    raise RuntimeError(
+        "找不到臺股期貨外資資料"
+    )
 
 
+# =========================
+# 主程式
+# =========================
 def main():
+
+    print("==============================")
+    print("盤後駐守｜開始抓取資料")
+    print("==============================")
 
     index_value, change, change_percent = get_twse_index()
 
@@ -183,27 +218,37 @@ def main():
 
     foreign_tx_oi = get_foreign_tx_oi()
 
-    print("================================")
-    print("盤後駐守｜市場資料測試")
-    print("================================")
+    print("")
+    print("【盤後駐守｜市場資料】")
+    print("")
 
-    if index_value is not None:
-        print(f"加權指數：{index_value:,.2f}")
+    print(
+        f"加權指數：{index_value:,.2f}"
+    )
 
     if change is not None:
-        print(f"漲跌點數：{change:+,.2f}")
+
+        print(
+            f"漲跌點數：{change:+,.2f}"
+        )
 
     if change_percent is not None:
-        print(f"漲跌幅：{change_percent:+.2f}%")
 
-    print(f"成交金額：{turnover_yi:,.0f} 億")
+        print(
+            f"漲跌幅：{change_percent:+.2f}%"
+        )
+
+    print(
+        f"成交金額：{turnover_yi:,.0f} 億"
+    )
 
     print(
         f"外資台指期淨未平倉："
         f"{foreign_tx_oi:,} 口"
     )
 
-    print("================================")
+    print("")
+    print("==============================")
 
 
 if __name__ == "__main__":
