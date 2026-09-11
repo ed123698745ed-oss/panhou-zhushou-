@@ -1,36 +1,93 @@
 import os
+import subprocess
 import requests
+
 
 LINE_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 LINE_USER_ID = os.environ["LINE_USER_ID"]
 
-message = """
-【盤後駐守｜測試訊息】
 
-LINE 自動推播系統已成功啟動。
-之後這裡會自動傳送每日台股盤後資料。
-""".strip()
+def get_market_message():
+    env = os.environ.copy()
 
-url = "https://api.line.me/v2/bot/message/push"
+    result = subprocess.run(
+        ["python", "fetch_market_data.py"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True
+    )
 
-headers = {
-    "Authorization": f"Bearer {LINE_TOKEN}",
-    "Content-Type": "application/json",
-}
+    output = result.stdout
 
-data = {
-    "to": LINE_USER_ID,
-    "messages": [
-        {
-            "type": "text",
-            "text": message
-        }
-    ]
-}
+    marker = "【盤後駐守"
 
-response = requests.post(url, headers=headers, json=data)
+    start = output.find(marker)
 
-print("Status:", response.status_code)
-print("Response:", response.text)
+    if start == -1:
+        raise RuntimeError(
+            f"找不到盤後駐守訊息區塊。\n完整輸出：\n{output}"
+        )
 
-response.raise_for_status()
+    message = output[start:].strip()
+
+    # 移除最後用來顯示在 GitHub log 的分隔線
+    lines = message.splitlines()
+
+    while lines and set(lines[-1].strip()) <= {"="}:
+        lines.pop()
+
+    message = "\n".join(lines).strip()
+
+    if not message:
+        raise RuntimeError("LINE 訊息內容為空")
+
+    return message
+
+
+def send_line(message):
+    url = "https://api.line.me/v2/bot/message/push"
+
+    headers = {
+        "Authorization": f"Bearer {LINE_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    data = {
+        "to": LINE_USER_ID,
+        "messages": [
+            {
+                "type": "text",
+                "text": message
+            }
+        ]
+    }
+
+    response = requests.post(
+        url,
+        headers=headers,
+        json=data,
+        timeout=20
+    )
+
+    print("LINE Status:", response.status_code)
+    print("LINE Response:", response.text)
+
+    response.raise_for_status()
+
+
+def main():
+    message = get_market_message()
+
+    print("準備傳送 LINE：")
+    print("------------------------------")
+    print(message)
+    print("------------------------------")
+
+    send_line(message)
+
+    print("LINE 推播成功")
+
+
+if __name__ == "__main__":
+    main()
