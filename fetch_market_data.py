@@ -121,7 +121,162 @@ def calc_retail_oi(
         "ratio": ratio,
     }
 
+def get_market_oi_from_taifex(symbol):
+    """
+    從 TAIFEX 一般交易時段行情表，
+    加總指定商品所有到期月份的未沖銷契約量。
+    symbol: "MTX" 或 "TMF"
+    """
 
+    url = (
+        "https://www.taifex.com.tw/cht/3/"
+        f"futDailyMarketExcel?commodity_id={symbol}"
+    )
+
+    response = requests.get(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0"
+        },
+        timeout=20
+    )
+
+    response.raise_for_status()
+
+    soup = BeautifulSoup(
+        response.text,
+        "html.parser"
+    )
+
+    total_oi = 0
+    found = False
+
+    for row in soup.find_all("tr"):
+
+        cells = [
+            cell.get_text(" ", strip=True)
+            for cell in row.find_all(["td", "th"])
+        ]
+
+        if not cells:
+            continue
+
+        # 第一欄必須是 MTX / TMF
+        if cells[0] != symbol:
+            continue
+
+        # 一般交易時段欄位中，
+        # 「未沖銷契約量」通常位於倒數幾欄，
+        # 這裡從整列找可解析數字並取 OI 欄位。
+        #
+        # 正式版下一步會再加欄名定位驗證。
+        try:
+            oi = int(
+                cells[12]
+                .replace(",", "")
+                .strip()
+            )
+        except Exception:
+            continue
+
+        total_oi += oi
+        found = True
+
+    if not found:
+        raise RuntimeError(
+            f"找不到 {symbol} 全市場未沖銷契約量"
+        )
+
+    return total_oi
+
+def get_institution_oi_from_taifex(product_name):
+    """
+    抓 TAIFEX 三大法人指定契約的
+    未平倉多單 / 空單合計。
+
+    product_name:
+    "小型臺指期貨"
+    "微型臺指期貨"
+    """
+
+    url = (
+        "https://www.taifex.com.tw/cht/3/"
+        "futContractsDateExcel"
+    )
+
+    response = requests.get(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0"
+        },
+        timeout=20
+    )
+
+    response.raise_for_status()
+
+    soup = BeautifulSoup(
+        response.text,
+        "html.parser"
+    )
+
+    rows = soup.find_all("tr")
+
+    active = False
+
+    institution_long = 0
+    institution_short = 0
+    count = 0
+
+    for row in rows:
+
+        cells = [
+            cell.get_text(" ", strip=True)
+            for cell in row.find_all(["td", "th"])
+        ]
+
+        if not cells:
+            continue
+
+        if product_name in cells:
+            active = True
+
+        if active and any(
+            name in cells
+            for name in ["自營商", "投信", "外資"]
+        ):
+
+            numbers = []
+
+            for value in cells:
+                try:
+                    numbers.append(
+                        int(
+                            value
+                            .replace(",", "")
+                            .strip()
+                        )
+                    )
+                except Exception:
+                    pass
+
+            if len(numbers) < 12:
+                continue
+
+            # 未平倉多單 / 空單
+            institution_long += numbers[6]
+            institution_short += numbers[8]
+
+            count += 1
+
+            if count == 3:
+                return (
+                    institution_long,
+                    institution_short
+                )
+
+    raise RuntimeError(
+        f"找不到 {product_name} 三大法人 OI"
+    )
 # =========================================================
 # 固定驗收資料
 # =========================================================
@@ -238,7 +393,48 @@ def get_fixture_market_data(target):
         "tmf_retail_ratio":
             tmf["ratio"],
     }
+def get_live_retail_data():
+    mtx_market_oi = get_market_oi_from_taifex("MTX")
 
+    mtx_inst_long, mtx_inst_short = (
+        get_institution_oi_from_taifex(
+            "小型臺指期貨"
+        )
+    )
+
+    tmf_market_oi = get_market_oi_from_taifex("TMF")
+
+    tmf_inst_long, tmf_inst_short = (
+        get_institution_oi_from_taifex(
+            "微型臺指期貨"
+        )
+    )
+
+    mtx = calc_retail_oi(
+        mtx_market_oi,
+        mtx_inst_long,
+        mtx_inst_short,
+    )
+
+    tmf = calc_retail_oi(
+        tmf_market_oi,
+        tmf_inst_long,
+        tmf_inst_short,
+    )
+
+    return {
+        "mtx_market_oi": mtx_market_oi,
+        "mtx_retail_long": mtx["retail_long"],
+        "mtx_retail_short": mtx["retail_short"],
+        "mtx_retail_net": mtx["retail_net"],
+        "mtx_retail_ratio": mtx["ratio"],
+
+        "tmf_market_oi": tmf_market_oi,
+        "tmf_retail_long": tmf["retail_long"],
+        "tmf_retail_short": tmf["retail_short"],
+        "tmf_retail_net": tmf["retail_net"],
+        "tmf_retail_ratio": tmf["ratio"],
+    }
 
 # =========================================================
 # 正式資料入口
