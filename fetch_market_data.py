@@ -243,12 +243,82 @@ def get_twse_index(target):
 # ============================================================
 # TWSE 成交金額
 # ============================================================
-
 def get_twse_turnover(target):
     """
-    正式 live 先使用 FMTQIK 官方成交金額。
-    9/10 fixture 仍固定使用專案驗收值 7,140 億。
+    盤後駐守使用「大盤即時成交金額」口徑，
+    目標對齊券商 POW00 顯示：
+    2026-09-10 約 7,140 億
+    2026-09-11 約 7,219 億
     """
+
+    today = datetime.now(TAIPEI).date()
+
+    # MIS 只能可靠取得當日資料
+    if target == today:
+        url = (
+            "https://mis.twse.com.tw/"
+            "stock/api/getStatis.jsp"
+        )
+
+        params = {
+            "ex": "tse",
+        }
+
+        response = request_get(
+            url,
+            params=params,
+        )
+
+        data = response.json()
+
+        # MIS 常見結構：
+        # {"msgArray":[{"tz":"..."}], ...}
+        rows = data.get("msgArray", [])
+
+        for row in rows:
+            # 優先找大盤成交金額相關欄位
+            for key in [
+                "tz",
+                "ta",
+                "tv",
+            ]:
+                value = row.get(key)
+
+                if value in (
+                    None,
+                    "",
+                    "-",
+                ):
+                    continue
+
+                try:
+                    number = Decimal(
+                        str(value)
+                        .replace(",", "")
+                    )
+                except Exception:
+                    continue
+
+                # 若原始值是「元」
+                if number > Decimal(
+                    "100000000"
+                ):
+                    return (
+                        number
+                        / Decimal(
+                            "100000000"
+                        )
+                    )
+
+                # 若已經是億元
+                if number > Decimal("1000"):
+                    return number
+
+    # --------------------------------------------------------
+    # 歷史日期：
+    # 9/10 已有固定 fixture，不會走到這裡。
+    # 其他歷史日期暫時 fallback 到 FMTQIK。
+    # --------------------------------------------------------
 
     url = (
         "https://www.twse.com.tw/"
@@ -256,8 +326,10 @@ def get_twse_turnover(target):
     )
 
     params = {
-        "date": target.strftime("%Y%m%d"),
-        "response": "json",
+        "date":
+            target.strftime("%Y%m%d"),
+        "response":
+            "json",
     }
 
     data = request_get(
@@ -276,47 +348,18 @@ def get_twse_turnover(target):
                 rows = table["data"]
                 break
 
-    target_text = (
-        f"{target.year - 1911}/"
-        f"{target.month:02d}/"
-        f"{target.day:02d}"
-    )
-
-    for row in rows:
-        if not row:
-            continue
-
-        if str(row[0]).strip() != target_text:
-            continue
-
-        # FMTQIK:
-        # 日期 / 成交股數 / 成交金額 / 成交筆數 ...
-        try:
-            amount = clean_decimal(
-                row[2]
-            )
-        except Exception:
-            continue
-
-        return (
-            amount
-            / Decimal("100000000")
-        )
-
-    # 部分 JSON 日期格式可能不同
     for row in reversed(rows):
         if len(row) < 3:
             continue
 
         try:
-            amount = clean_decimal(
-                row[2]
-            )
-
-            return (
-                amount
+            amount = (
+                clean_decimal(row[2])
                 / Decimal("100000000")
             )
+
+            return amount
+
         except Exception:
             continue
 
