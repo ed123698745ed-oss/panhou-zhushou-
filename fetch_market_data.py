@@ -42,7 +42,6 @@ def get_twse_index():
     )
 
     response.raise_for_status()
-
     data = response.json()
 
     target = None
@@ -66,7 +65,6 @@ def get_twse_index():
     change = None
     change_percent = None
 
-    # 收盤指數
     for key, value in target.items():
 
         if "收盤" in key:
@@ -87,23 +85,21 @@ def get_twse_index():
             except:
                 pass
 
-    # 備援判斷
-    if index_value is None:
-
-        for value in target.values():
-
-            try:
-                number = clean_float(value)
-
-                if 10000 < number < 100000:
-                    index_value = number
-                    break
-
-            except:
-                pass
-
     if index_value is None:
         raise RuntimeError("無法解析加權指數")
+
+    # TWSE 的漲跌點數欄位可能沒有帶正負號
+    # 直接依漲跌幅決定方向
+    if change is not None and change_percent is not None:
+
+        if change_percent < 0:
+            change = -abs(change)
+
+        elif change_percent > 0:
+            change = abs(change)
+
+        else:
+            change = 0.0
 
     return index_value, change, change_percent
 
@@ -113,9 +109,23 @@ def get_twse_index():
 # =========================
 def get_twse_turnover():
 
+    mis_url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+
+    params = {
+        "ex_ch": "tse_t00.tw",
+        "json": "1",
+        "delay": "0"
+    }
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://mis.twse.com.tw/"
+    }
+
     response = requests.get(
-        TWSE_TURNOVER_URL,
-        headers=HEADERS,
+        mis_url,
+        params=params,
+        headers=headers,
         timeout=20
     )
 
@@ -123,20 +133,22 @@ def get_twse_turnover():
 
     data = response.json()
 
-    if not data:
-        raise RuntimeError("找不到成交金額資料")
+    rows = data.get("msgArray", [])
 
-    latest = data[-1]
+    if not rows:
+        raise RuntimeError("MIS 找不到加權指數資料")
 
-    if "TradeValue" not in latest:
+    row = rows[0]
+
+    # tv = 加權指數當日累計成交金額
+    turnover = row.get("tv")
+
+    if turnover in [None, "", "-"]:
         raise RuntimeError(
-            f"找不到 TradeValue，實際欄位：{list(latest.keys())}"
+            f"MIS 找不到成交金額，實際資料：{row}"
         )
 
-    turnover = clean_int(latest["TradeValue"])
-
-    # 元 → 億元
-    turnover_yi = turnover / 100000000
+    turnover_yi = clean_float(turnover)
 
     return turnover_yi
 
