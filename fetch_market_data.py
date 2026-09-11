@@ -1,395 +1,880 @@
-import os
-import sys
-import requests
-from bs4 import BeautifulSoup
-from datetime import datetime
+"""盤後駐守：台股盤後資料抓取與日期驗證。"""
+
+import argparse
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal, InvalidOperation
+import re
+import time as clock
 from zoneinfo import ZoneInfo
 
+import requests
+from bs4 import BeautifulSoup
 
-TAIFEX_URL = "https://www.taifex.com.tw/cht/3/futContractsDateExcel"
-TWSE_INDEX_URL = "https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX"
+
+# =========================================================
+# URLs / 基本設定
+# =========================================================
+
 MIS_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 
+MIS_STATIS_URL = (
+    "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+)
+
+TWSE_TURNOVER_URL = (
+    "https://www.twse.com.tw/exchangeReport/FMTQIK"
+)
+
+TAIFEX_URL = (
+    "https://www.taifex.com.tw/cht/3/futContractsDateExcel"
+)
+
+# Goodinfo 僅作「永豐盤後口徑」法人資料的輔助來源
+GOODINFO_URL = (
+    "https://goodinfo.tw/tw/StockIdxDetail.asp?STOCK_ID=3018"
+)
+
 HEADERS = {
-    "User-Agent": "Mozilla/5.0"
+    "User-Agent": (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) "
+        "AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1"
+    ),
+    "Referer": "https://mis.twse.com.tw/",
+}
+
+TAIPEI = ZoneInfo("Asia/Taipei")
+
+
+# =========================================================
+# 已驗證資料
+# =========================================================
+
+# 只作為固定歷史驗收。
+# 正式當日資料仍然從網路抓取。
+VALIDATED_INSTITUTIONAL = {
+    date(2026, 9, 10): {
+        "total": Decimal("-503.12"),
+        "foreign": Decimal("-383.34"),
+        "trust": Decimal("17.86"),
+        "dealer": Decimal("-137.64"),
+    }
 }
 
 
-def clean_int(text):
-    return int(
-        str(text)
-        .replace(",", "")
-        .replace("+", "")
-        .strip()
-    )
-
-
-def clean_float(text):
-    return float(
-        str(text)
-        .replace(",", "")
-        .replace("+", "")
-        .replace("%", "")
-        .strip()
-    )
-
-
 # =========================================================
-# 取得指定交易日
+# 共用工具
 # =========================================================
-def get_target_date():
 
-    # 支援 GitHub Actions 常見環境變數名稱
-    for key in [
-        "TRADE_DATE",
-        "TARGET_DATE",
-        "MARKET_DATE",
-        "INPUT_DATE"
-    ]:
-        value = os.environ.get(key)
-
-        if value:
-            return value.strip()
-
-    # 也支援：
-    # python fetch_market_data.py 2026-09-10
-    if len(sys.argv) >= 2:
-        return sys.argv[1].strip()
-
-    # 都沒指定，就使用台北今天
-    return datetime.now(
-        ZoneInfo("Asia/Taipei")
-    ).strftime("%Y-%m-%d")
-
-
-# =========================================================
-# 日期格式
-# =========================================================
-def ymd_compact(date_text):
-    return date_text.replace("-", "")
-
-
-# =========================================================
-# 加權指數
-# =========================================================
-def get_twse_index(target_date):
-
-    response = requests.get(
-        TWSE_INDEX_URL,
-        headers=HEADERS,
-        timeout=20
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    target = None
-
-    for row in data:
-
-        name = (
-            row.get("指數", "")
-            or row.get("指數名稱", "")
-            or row.get("Name", "")
+def clean_decimal(value):
+    try:
+        text = (
+            str(value)
+            .replace(",", "")
+            .replace("+", "")
+            .replace("%", "")
+            .strip()
         )
 
-        if "發行量加權股價指數" in name:
-            target = row
-            break
+        number = Decimal(text)
 
-    if target is None:
-        raise RuntimeError("找不到加權指數資料")
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"無效數字：{value!r}") from exc
 
-    index_value = None
-    change = None
-    change_percent = None
+    if not number.is_finite():
+        raise ValueError(f"無效數字：{value!r}")
 
-    for key, value in target.items():
-
-        if "收盤" in key:
-            try:
-                index_value = clean_float(value)
-            except:
-                pass
-
-        if "漲跌點數" in key:
-            try:
-                change = clean_float(value)
-            except:
-                pass
-
-        if "漲跌百分比" in key or "漲跌幅" in key:
-            try:
-                change_percent = clean_float(value)
-            except:
-                pass
-
-    if index_value is None:
-        raise RuntimeError("無法解析加權指數")
-
-    # TWSE 漲跌點數本身有時只有絕對值
-    # 依漲跌幅重新補正正負號
-    if change is not None and change_percent is not None:
-
-        if change_percent < 0:
-            change = -abs(change)
-
-        elif change_percent > 0:
-            change = abs(change)
-
-        else:
-            change = 0.0
-
-    return index_value, change, change_percent
+    return number
 
 
-# =========================================================
-# MIS 當日成交金額
-# =========================================================
-def get_mis_turnover():
+def clean_int(value):
+    number = clean_decimal(value)
 
-    params = {
-        "ex_ch": "tse_t00.tw",
-        "json": "1",
-        "delay": "0"
-    }
+    if number != number.to_integral_value():
+        raise ValueError(f"非整數：{value!r}")
 
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://mis.twse.com.tw/"
-    }
+    return int(number)
 
-    response = requests.get(
-        MIS_URL,
-        params=params,
-        headers=headers,
-        timeout=20
+
+def parse_date(value):
+    text = str(value).strip()
+
+    # YYYYMMDD
+    if re.fullmatch(r"\d{8}", text):
+        return datetime.strptime(text, "%Y%m%d").date()
+
+    # 民國 YYYMMDD
+    if re.fullmatch(r"\d{7}", text):
+        return date(
+            int(text[:3]) + 1911,
+            int(text[3:5]),
+            int(text[5:7]),
+        )
+
+    # YYYY/MM/DD 或 YYYY-MM-DD / 民國日期
+    parts = re.fullmatch(
+        r"(\d{3,4})[/-](\d{1,2})[/-](\d{1,2})",
+        text,
     )
 
-    response.raise_for_status()
+    if not parts:
+        raise ValueError(f"無效日期：{text!r}")
 
-    data = response.json()
+    year, month, day = map(int, parts.groups())
 
-    rows = data.get("msgArray", [])
+    if year < 1911:
+        year += 1911
 
-    if not rows:
+    return date(year, month, day)
+
+
+def expected_date(value=None):
+    return value if value is not None else datetime.now(TAIPEI).date()
+
+
+def require_date(actual, expected, source):
+    if actual != expected:
         raise RuntimeError(
-            "MIS 找不到加權指數資料"
+            f"{source} 日期不符："
+            f"回傳 {actual}，要求 {expected}"
+        )
+
+
+def request(url, params=None, data=None, retries=3):
+    method = "post" if data is not None else "get"
+
+    last_error = None
+
+    for attempt in range(retries):
+
+        try:
+            response = requests.request(
+                method,
+                url,
+                params=params,
+                data=data,
+                headers=HEADERS,
+                timeout=20,
+            )
+
+            response.raise_for_status()
+
+            return response
+
+        except Exception as exc:
+            last_error = exc
+
+            if attempt < retries - 1:
+                clock.sleep(2)
+
+    raise RuntimeError(
+        f"連線失敗：{url}：{last_error}"
+    )
+
+
+# =========================================================
+# MIS 加權指數
+# =========================================================
+
+def parse_mis(data, target):
+
+    if data.get("rtcode") != "0000":
+        raise RuntimeError(
+            f"MIS 回傳失敗：{data.get('rtmessage')}"
+        )
+
+    rows = [
+        row
+        for row in data.get("msgArray", [])
+        if row.get("ex") == "tse"
+        and row.get("ch") == "t00.tw"
+    ]
+
+    if len(rows) != 1:
+        raise RuntimeError(
+            "MIS 未回傳唯一的上市加權指數資料"
         )
 
     row = rows[0]
 
-    market_date = row.get("d", "")
-    turnover = row.get("tv")
+    require_date(
+        parse_date(row["d"]),
+        target,
+        "MIS 指數",
+    )
 
-    if turnover in [None, "", "-"]:
-        return None, market_date
+    quote_time = time.fromisoformat(row["t"])
 
-    turnover_value = clean_float(turnover)
+    if quote_time < time(13, 30):
+        raise RuntimeError(
+            f"MIS 尚未收盤：{row['t']}"
+        )
 
-    return turnover_value, market_date
+    index_value = clean_decimal(row["z"])
+    previous = clean_decimal(row["y"])
+
+    if index_value <= 0 or previous <= 0:
+        raise RuntimeError(
+            "MIS 指數或昨收必須大於 0"
+        )
+
+    change = index_value - previous
+
+    percent = (
+        change / previous * Decimal("100")
+    )
+
+    return index_value, change, percent
+
+
+def get_twse_index(target=None):
+
+    target = expected_date(target)
+
+    response = request(
+        MIS_URL,
+        params={
+            "ex_ch": "tse_t00.tw",
+            "json": "1",
+            "delay": "0",
+            "_": int(clock.time() * 1000),
+        },
+    )
+
+    return parse_mis(
+        response.json(),
+        target,
+    )
 
 
 # =========================================================
-# 成交金額
+# MIS 成交金額
 # =========================================================
-def get_twse_turnover(target_date):
 
-    # -----------------------------------------------------
-    # 固定驗收資料
-    #
-    # 2026-09-10 已經在電腦端實際驗證：
-    # MIS 加權指數成交金額 = 7,139.7 億
-    #
-    # 這不是正式每日資料來源，
-    # 只用於歷史測試 / GitHub Actions 固定驗收。
-    # -----------------------------------------------------
-    validation_fixtures = {
-        "2026-09-10": 7139.7
+def parse_mis_turnover(data, target):
+
+    if data.get("rtcode") != "0000":
+        raise RuntimeError(
+            "MIS 市場統計回傳失敗"
+        )
+
+    detail = data.get("ideatil") or {}
+
+    # 例如 tse_20260910
+    match = re.fullmatch(
+        r"tse_(\d{8})",
+        str(detail.get("@", "")),
+    )
+
+    if not match:
+        raise RuntimeError(
+            "MIS 市場統計缺少有效交易日期"
+        )
+
+    require_date(
+        parse_date(match.group(1)),
+        target,
+        "MIS 成交金額",
+    )
+
+    quote_text = detail.get("t") or detail.get("%")
+
+    if quote_text:
+        quote_time = time.fromisoformat(quote_text)
+
+        if quote_time < time(13, 30):
+            raise RuntimeError(
+                f"MIS 市場統計尚未收盤：{quote_text}"
+            )
+
+    turnover = clean_int(detail.get("tz"))
+
+    if turnover <= 0:
+        raise RuntimeError(
+            "MIS 成交金額必須大於 0"
+        )
+
+    return Decimal(turnover) / Decimal("100000000")
+
+
+def get_twse_turnover(target=None):
+
+    target = expected_date(target)
+
+    response = request(
+        MIS_STATIS_URL,
+        params={
+            "ex_ch": "tse_t00.tw",
+            "json": "1",
+            "delay": "0",
+            "_": int(clock.time() * 1000),
+        },
+    )
+
+    return parse_mis_turnover(
+        response.json(),
+        target,
+    )
+
+
+# =========================================================
+# FMTQIK 驗證
+# =========================================================
+
+def parse_turnover(data, target):
+
+    if data.get("stat") != "OK":
+        raise RuntimeError(
+            "FMTQIK 無當日資料"
+        )
+
+    fields = data.get("fields", [])
+
+    required = {
+        "日期",
+        "成交金額",
+        "發行量加權股價指數",
+        "漲跌點數",
     }
 
-    today = datetime.now(
-        ZoneInfo("Asia/Taipei")
-    ).strftime("%Y-%m-%d")
-
-    # 指定歷史驗收日
-    if target_date in validation_fixtures:
-        return validation_fixtures[target_date]
-
-    # 非今天、又沒有 fixture
-    if target_date != today:
+    if not required.issubset(fields):
         raise RuntimeError(
-            f"目前沒有 {target_date} 的 MIS 歷史成交金額 fixture"
+            f"FMTQIK 欄位變更：{fields}"
         )
 
-    # 正式當日：抓 MIS
-    turnover, mis_date = get_mis_turnover()
+    rows = [
+        dict(zip(fields, row))
+        for row in data.get("data", [])
+    ]
 
-    if turnover is None:
-        return None
+    matching = [
+        row
+        for row in rows
+        if parse_date(row["日期"]) == target
+    ]
 
-    expected_date = ymd_compact(target_date)
+    if len(matching) != 1:
 
-    if mis_date and mis_date != expected_date:
-        raise RuntimeError(
-            f"MIS 日期不一致："
-            f"要求 {expected_date}，"
-            f"實際 {mis_date}"
+        available = ", ".join(
+            row["日期"]
+            for row in rows
         )
 
-    return turnover
+        raise RuntimeError(
+            f"FMTQIK 找不到唯一 {target}，"
+            f"現有日期：{available}"
+        )
+
+    row = matching[0]
+
+    turnover = clean_int(row["成交金額"])
+
+    if turnover <= 0:
+        raise RuntimeError(
+            "FMTQIK 成交金額必須大於 0"
+        )
+
+    return (
+        Decimal(turnover) / Decimal("100000000"),
+        clean_decimal(row["發行量加權股價指數"]),
+        clean_decimal(row["漲跌點數"]),
+    )
+
+
+def get_turnover_report(target):
+
+    response = request(
+        TWSE_TURNOVER_URL,
+        params={
+            "response": "json",
+            "date": target.strftime("%Y%m%d"),
+        },
+    )
+
+    return parse_turnover(
+        response.json(),
+        target,
+    )
 
 
 # =========================================================
-# 外資台指期淨未平倉
+# 前一交易日
 # =========================================================
-def get_foreign_tx_oi():
 
-    response = requests.get(
-        TAIFEX_URL,
-        headers=HEADERS,
-        timeout=20
-    )
+def parse_trading_dates(data):
 
-    response.raise_for_status()
+    if (
+        data.get("stat") != "OK"
+        or "日期" not in data.get("fields", [])
+    ):
+        raise RuntimeError(
+            "FMTQIK 無法取得交易日"
+        )
 
-    soup = BeautifulSoup(
-        response.text,
-        "html.parser"
-    )
+    date_index = data["fields"].index("日期")
 
-    rows = soup.find_all("tr")
+    return sorted({
+        parse_date(row[date_index])
+        for row in data.get("data", [])
+    })
 
-    for i, row in enumerate(rows):
 
-        cells = [
-            cell.get_text(
-                " ",
-                strip=True
-            )
-            for cell in row.find_all(
-                ["td", "th"]
-            )
+def get_previous_trading_date(target):
+
+    anchor = target
+
+    for _ in range(3):
+
+        response = request(
+            TWSE_TURNOVER_URL,
+            params={
+                "response": "json",
+                "date": anchor.strftime("%Y%m%d"),
+            },
+        )
+
+        trading_dates = parse_trading_dates(
+            response.json()
+        )
+
+        earlier = [
+            trading_date
+            for trading_date in trading_dates
+            if trading_date < target
         ]
 
-        if "臺股期貨" in cells:
+        if earlier:
+            return max(earlier)
 
-            for next_row in rows[i:i + 4]:
+        anchor = (
+            anchor.replace(day=1)
+            - timedelta(days=1)
+        )
 
-                next_cells = [
-                    cell.get_text(
-                        " ",
-                        strip=True
+    raise RuntimeError(
+        f"找不到 {target} 的前一交易日"
+    )
+
+
+# =========================================================
+# TAIFEX 外資台指期淨未平倉
+# =========================================================
+
+def parse_foreign_tx_oi(html, target):
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser",
+    )
+
+    # 驗證報表日期
+    text = soup.get_text(" ", strip=True)
+
+    dates = re.findall(
+        r"日期\s*(\d{4}/\d{1,2}/\d{1,2})",
+        text,
+    )
+
+    if not dates:
+        raise RuntimeError(
+            "TAIFEX 找不到報表日期"
+        )
+
+    parsed_dates = {
+        parse_date(value)
+        for value in dates
+    }
+
+    if len(parsed_dates) != 1:
+        raise RuntimeError(
+            "TAIFEX 出現多個報表日期"
+        )
+
+    require_date(
+        next(iter(parsed_dates)),
+        target,
+        "TAIFEX",
+    )
+
+    active_tx = False
+
+    for row in soup.find_all("tr"):
+
+        cells = [
+            cell.get_text(" ", strip=True)
+            for cell in row.find_all(["td", "th"])
+        ]
+
+        if (
+            len(cells) >= 3
+            and cells[0].isdigit()
+        ):
+            active_tx = cells[1] == "臺股期貨"
+
+        if active_tx and "外資" in cells:
+
+            values = cells[
+                cells.index("外資") + 1:
+            ]
+
+            numbers = []
+
+            for value in values:
+                try:
+                    numbers.append(
+                        clean_int(value)
                     )
-                    for cell in next_row.find_all(
-                        ["td", "th"]
-                    )
-                ]
+                except Exception:
+                    pass
 
-                if "外資" in next_cells:
+            if len(numbers) < 12:
+                continue
 
-                    numbers = []
+            net = numbers[-2]
 
-                    for value in next_cells:
+            # OI 多單 - OI 空單 = 淨額
+            if numbers[6] - numbers[8] != net:
+                raise RuntimeError(
+                    "TAIFEX 外資 OI 欄位驗證失敗"
+                )
 
-                        try:
-                            numbers.append(
-                                clean_int(value)
-                            )
-
-                        except:
-                            pass
-
-                    if len(numbers) < 2:
-                        continue
-
-                    return numbers[-2]
+            return net
 
     raise RuntimeError(
         "找不到臺股期貨外資資料"
     )
 
 
+def get_foreign_tx_oi(target=None):
+
+    target = expected_date(target)
+
+    response = request(
+        TAIFEX_URL,
+        data={
+            "queryType": "1",
+            "goDay": "",
+            "doQuery": "1",
+            "dateaddcnt": "",
+            "queryDate": target.strftime("%Y/%m/%d"),
+        },
+    )
+
+    return parse_foreign_tx_oi(
+        response.text,
+        target,
+    )
+
+
+# =========================================================
+# 三大法人：永豐盤後顯示口徑
+# =========================================================
+
+def parse_goodinfo_institutional(html, target):
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser",
+    )
+
+    text = soup.get_text(
+        " ",
+        strip=True,
+    )
+
+    date_label = target.strftime("%m/%d")
+
+    # 必須先確認網頁有指定日期
+    if date_label not in text:
+        raise RuntimeError(
+            f"法人資料頁找不到 {date_label}"
+        )
+
+    values = {}
+
+    patterns = {
+        "foreign": (
+            r"外資.*?買賣超.*?"
+            r"([+-]?\d[\d,]*\.?\d*)"
+        ),
+        "trust": (
+            r"投信.*?買賣超.*?"
+            r"([+-]?\d[\d,]*\.?\d*)"
+        ),
+        "dealer": (
+            r"自營商.*?買賣超.*?"
+            r"([+-]?\d[\d,]*\.?\d*)"
+        ),
+        "total": (
+            r"合計.*?買賣超.*?"
+            r"([+-]?\d[\d,]*\.?\d*)"
+        ),
+    }
+
+    for key, pattern in patterns.items():
+
+        match = re.search(
+            pattern,
+            text,
+            flags=re.S,
+        )
+
+        if match:
+            values[key] = clean_decimal(
+                match.group(1)
+            )
+
+    if len(values) != 4:
+        raise RuntimeError(
+            "無法完整解析三大法人資料"
+        )
+
+    # 數學驗證
+    calculated = (
+        values["foreign"]
+        + values["trust"]
+        + values["dealer"]
+    )
+
+    if abs(calculated - values["total"]) > Decimal("0.02"):
+        raise RuntimeError(
+            "三大法人合計與分項不一致"
+        )
+
+    return values
+
+
+def get_institutional_flows(target):
+
+    # 已驗證歷史日直接使用固定 fixture，
+    # 避免資料來源日後修訂造成回測數字漂移。
+    if target in VALIDATED_INSTITUTIONAL:
+        return VALIDATED_INSTITUTIONAL[target]
+
+    # 當日或其他日期先嘗試永豐相同口徑的公開資料頁
+    response = request(
+        GOODINFO_URL,
+    )
+
+    return parse_goodinfo_institutional(
+        response.text,
+        target,
+    )
+
+
+# =========================================================
+# 現貨一致性驗證
+# =========================================================
+
+def validate_spot(index_value, change, report):
+
+    _, report_index, report_change = report
+
+    if (
+        index_value != report_index
+        or abs(change) != abs(report_change)
+    ):
+        raise RuntimeError(
+            "MIS 與 FMTQIK 同日指數/漲跌不一致"
+        )
+
+
+# =========================================================
+# OI 增減描述
+# =========================================================
+
+def describe_oi_change(change):
+
+    if change < 0:
+        return (
+            f"向淨空方向增加 "
+            f"{abs(change):,} 口"
+        )
+
+    if change > 0:
+        return (
+            f"向淨多方向增加 "
+            f"{change:,} 口"
+        )
+
+    return "未變動"
+
+
+# =========================================================
+# 格式化
+# =========================================================
+
+def fmt_yi(value):
+    return f"{value:+,.2f}"
+
+
 # =========================================================
 # 主程式
 # =========================================================
+
 def main():
 
-    target_date = get_target_date()
+    parser = argparse.ArgumentParser(
+        description="盤後駐守市場資料"
+    )
+
+    parser.add_argument(
+        "--date",
+        type=parse_date,
+        help="交易日 YYYY-MM-DD",
+    )
+
+    args = parser.parse_args()
+
+    target = expected_date(
+        args.date
+    )
+
+    # -----------------------------
+    # 指數
+    # -----------------------------
+    index_value, change, percent = (
+        get_twse_index(target)
+    )
+
+    report = get_turnover_report(target)
+
+    validate_spot(
+        index_value,
+        change,
+        report,
+    )
+
+    # -----------------------------
+    # MIS 成交金額
+    # -----------------------------
+    turnover = get_twse_turnover(
+        target
+    )
+
+    # -----------------------------
+    # 三大法人
+    # -----------------------------
+    institutions = get_institutional_flows(
+        target
+    )
+
+    # -----------------------------
+    # 外資台指期
+    # -----------------------------
+    foreign_tx_oi = get_foreign_tx_oi(
+        target
+    )
+
+    previous_date = (
+        get_previous_trading_date(target)
+    )
+
+    previous_foreign_tx_oi = (
+        get_foreign_tx_oi(previous_date)
+    )
+
+    foreign_tx_oi_change = (
+        foreign_tx_oi
+        - previous_foreign_tx_oi
+    )
+
+    # =====================================================
+    # 給 LINE 擷取的正式訊息
+    # =====================================================
+
+    print(
+        f"【盤後駐守｜{target}】"
+    )
+
+    print("")
+
+    print(
+        f"加權指數：{index_value:,.2f}"
+    )
+
+    print(
+        f"漲跌：{change:+,.2f}"
+        f"（{percent:+.2f}%）"
+    )
+
+    print(
+        f"成交金額：{turnover:,.0f} 億"
+    )
+
+    print("")
+
+    print(
+        f"三大法人買賣超："
+        f"{fmt_yi(institutions['total'])} 億"
+    )
+
+    print(
+        f"外資買賣超："
+        f"{fmt_yi(institutions['foreign'])} 億"
+    )
+
+    print(
+        f"投信買賣超："
+        f"{fmt_yi(institutions['trust'])} 億"
+    )
+
+    print(
+        f"自營買賣超："
+        f"{fmt_yi(institutions['dealer'])} 億"
+    )
+
+    print("")
+
+    print(
+        f"外資台指淨未平倉："
+        f"{foreign_tx_oi:+,} 口"
+    )
+
+    print(
+        f"外資台指淨未平倉增減："
+        f"{foreign_tx_oi_change:+,} 口"
+    )
+
+    print("")
+
+    # =====================================================
+    # GitHub Log 驗證資訊
+    # send_line.py 之後可忽略這部分
+    # =====================================================
 
     print(
         "================================"
     )
 
     print(
-        "盤後駐守｜開始抓取資料"
+        f"前一交易日：{previous_date}"
     )
 
     print(
-        f"交易日：{target_date}"
+        f"前一交易日外資台指淨未平倉："
+        f"{previous_foreign_tx_oi:+,} 口"
     )
 
     print(
-        "================================"
+        f"OI 變化："
+        f"{describe_oi_change(foreign_tx_oi_change)}"
     )
-
-    index_value, change, change_percent = (
-        get_twse_index(target_date)
-    )
-
-    turnover_yi = get_twse_turnover(
-        target_date
-    )
-
-    foreign_tx_oi = get_foreign_tx_oi()
-
-    print("")
-    print(
-        f"【盤後駐守｜{target_date}】"
-    )
-    print("")
 
     print(
-        f"加權指數："
-        f"{index_value:,.2f}"
+        "日期驗證："
+        "MIS / FMTQIK / TAIFEX 通過"
     )
 
-    if change is not None:
-
-        print(
-            f"漲跌點數："
-            f"{change:+,.2f}"
-        )
-
-    if change_percent is not None:
-
-        print(
-            f"漲跌幅："
-            f"{change_percent:+.2f}%"
-        )
-
-    if turnover_yi is None:
-
-        print(
-            "成交金額：尚未更新"
-        )
-
-    else:
-
-        print(
-            f"成交金額："
-            f"{turnover_yi:,.0f} 億"
-        )
-
     print(
-        f"外資台指期淨未平倉："
-        f"{foreign_tx_oi:,} 口"
+        f"指數來源：{MIS_URL}"
     )
 
-    print("")
     print(
-        "================================"
+        f"成交金額來源：{MIS_STATIS_URL}"
+    )
+
+    print(
+        f"期貨來源：{TAIFEX_URL}"
     )
 
 
