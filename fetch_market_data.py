@@ -1119,132 +1119,47 @@ def get_market_data(target):
 # 輸出
 # ============================================================
 
+def format_market_data(data):
+    """組成推播用文字（print 與 LINE 共用同一份）"""
+    lines = [
+        f"【盤後駐守｜{data['date']}】",
+        "",
+        f"加權指數：{data['index']:,.2f}",
+        f"漲跌：{data['change']:+,.2f} ({data['percent']:+.2f}%)",
+        f"成交金額：{data['turnover']:,.0f} 億",
+        "",
+        f"三大法人買賣超：{fmt_yi(data['institution_total'])} 億",
+        f"外資買賣超：{fmt_yi(data['foreign'])} 億",
+        f"投信買賣超：{fmt_yi(data['trust'])} 億",
+        f"自營買賣超：{fmt_yi(data['dealer'])} 億",
+        "",
+        f"外資台指淨未平倉：{data['foreign_tx_oi']:+,} 口",
+        f"外資台指淨未平倉增減：{data['foreign_tx_oi_change']:+,} 口",
+        "",
+        f"散戶小台淨未平倉：{data['mtx_retail_net']:+,} 口",
+        f"散戶微台淨未平倉：{data['tmf_retail_net']:+,} 口",
+        "",
+        f"小台散戶多空比：{data['mtx_retail_ratio']:+.2f}%",
+        f"微台散戶多空比：{data['tmf_retail_ratio']:+.2f}%",
+    ]
+    return "\n".join(lines)
+
+
 def print_market_data(data):
-    print(
-        f"【盤後駐守｜"
-        f"{data['date']}】"
-    )
+    print(format_market_data(data))
 
+    # 以下為除錯明細，只印在 log，不推播
     print()
-
-    print(
-        "加權指數："
-        f"{data['index']:,.2f}"
-    )
-
-    print(
-        "漲跌："
-        f"{data['change']:+,.2f} "
-        f"({data['percent']:+.2f}%)"
-    )
-
-    print(
-        "成交金額："
-        f"{data['turnover']:,.0f} 億"
-    )
-
+    print("================================")
+    print(f"前一交易日外資台指淨未平倉：{data['previous_foreign_tx_oi']:+,} 口")
     print()
-
-    print(
-        "三大法人買賣超："
-        f"{fmt_yi(data['institution_total'])} 億"
-    )
-
-    print(
-        "外資買賣超："
-        f"{fmt_yi(data['foreign'])} 億"
-    )
-
-    print(
-        "投信買賣超："
-        f"{fmt_yi(data['trust'])} 億"
-    )
-
-    print(
-        "自營買賣超："
-        f"{fmt_yi(data['dealer'])} 億"
-    )
-
+    print(f"小台全市場 OI：{data['mtx_market_oi']:,}")
+    print(f"小台散戶多單：{data['mtx_retail_long']:,}")
+    print(f"小台散戶空單：{data['mtx_retail_short']:,}")
     print()
-
-    print(
-        "外資台指淨未平倉："
-        f"{data['foreign_tx_oi']:+,} 口"
-    )
-
-    print(
-        "外資台指淨未平倉增減："
-        f"{data['foreign_tx_oi_change']:+,} 口"
-    )
-
-    print()
-
-    print(
-        "散戶小台淨未平倉："
-        f"{data['mtx_retail_net']:+,} 口"
-    )
-
-    print(
-        "散戶微台淨未平倉："
-        f"{data['tmf_retail_net']:+,} 口"
-    )
-
-    print()
-
-    print(
-        "小台散戶多空比："
-        f"{data['mtx_retail_ratio']:+.2f}%"
-    )
-
-    print(
-        "微台散戶多空比："
-        f"{data['tmf_retail_ratio']:+.2f}%"
-    )
-
-    print()
-
-    print(
-        "================================"
-    )
-
-    print(
-        "前一交易日外資台指淨未平倉："
-        f"{data['previous_foreign_tx_oi']:+,} 口"
-    )
-
-    print()
-
-    print(
-        "小台全市場 OI："
-        f"{data['mtx_market_oi']:,}"
-    )
-
-    print(
-        "小台散戶多單："
-        f"{data['mtx_retail_long']:,}"
-    )
-
-    print(
-        "小台散戶空單："
-        f"{data['mtx_retail_short']:,}"
-    )
-
-    print()
-
-    print(
-        "微台全市場 OI："
-        f"{data['tmf_market_oi']:,}"
-    )
-
-    print(
-        "微台散戶多單："
-        f"{data['tmf_retail_long']:,}"
-    )
-
-    print(
-        "微台散戶空單："
-        f"{data['tmf_retail_short']:,}"
-    )
+    print(f"微台全市場 OI：{data['tmf_market_oi']:,}")
+    print(f"微台散戶多單：{data['tmf_retail_long']:,}")
+    print(f"微台散戶空單：{data['tmf_retail_short']:,}")
 
 
 # ============================================================
