@@ -264,17 +264,17 @@ def get_twse_turnover(target):
             "ex": "tse",
         }
 
-        response = request_get(
+                response = request_get(
             url,
             params=params,
         )
 
         data = response.json()
-print("=== MIS DEBUG START ===")
-print(data)
-print("=== MIS DEBUG END ===")
-        # MIS 常見結構：
-        # {"msgArray":[{"tz":"..."}], ...}
+
+        print("=== MIS DEBUG START ===")
+        print(data)
+        print("=== MIS DEBUG END ===")
+
         rows = data.get("msgArray", [])
 
         for row in rows:
@@ -283,6 +283,7 @@ print("=== MIS DEBUG END ===")
                 "tz",
                 "ta",
                 "tv",
+    
             ]:
                 value = row.get(key)
 
