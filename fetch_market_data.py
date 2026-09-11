@@ -270,7 +270,9 @@ def get_twse_turnover(target):
         )
 
         data = response.json()
-
+print("=== MIS DEBUG START ===")
+print(data)
+print("=== MIS DEBUG END ===")
         # MIS 常見結構：
         # {"msgArray":[{"tz":"..."}], ...}
         rows = data.get("msgArray", [])
