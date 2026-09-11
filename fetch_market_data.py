@@ -264,7 +264,7 @@ def get_twse_turnover(target):
             "ex": "tse",
         }
 
-                response = request_get(
+        response = request_get(
             url,
             params=params,
         )
