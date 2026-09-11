@@ -4,9 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       market_date:
-        description: "交易日 YYYY-MM-DD（留空使用台北今天）"
+        description: "交易日 YYYY-MM-DD（留空則為今天）"
         required: false
         type: string
+
+  schedule:
+    # 週一到週五 台北時間 20:00（= UTC 12:00）
+    - cron: "0 12 * * 1-5"
 
 jobs:
   market-data:
@@ -24,11 +28,14 @@ jobs:
       - name: Install packages
         run: pip install requests beautifulsoup4
 
-      - name: Fetch market data
+      - name: Fetch and push to LINE
         shell: bash
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
         run: |
           if [ -n "${{ inputs.market_date }}" ]; then
-            python fetch_market_data.py --date "${{ inputs.market_date }}"
+            python send_line.py --date "${{ inputs.market_date }}"
           else
-            python fetch_market_data.py
+            python send_line.py
           fi
