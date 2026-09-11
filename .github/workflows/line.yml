@@ -2,6 +2,11 @@ name: Market Data Test
 
 on:
   workflow_dispatch:
+    inputs:
+      market_date:
+        description: "交易日 YYYY-MM-DD（留空使用台北今天）"
+        required: false
+        type: string
 
 jobs:
   market-data:
@@ -20,4 +25,10 @@ jobs:
         run: pip install requests beautifulsoup4
 
       - name: Fetch market data
-        run: python fetch_market_data.py
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.market_date }}" ]; then
+            python fetch_market_data.py --date "${{ inputs.market_date }}"
+          else
+            python fetch_market_data.py
+          fi
