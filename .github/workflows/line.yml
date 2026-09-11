@@ -15,6 +15,7 @@ jobs:
   market-data:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+
     env:
       TZ: Asia/Taipei
       MARKET_DATE: ${{ inputs.market_date }}
@@ -32,7 +33,7 @@ jobs:
         run: pip install requests beautifulsoup4
 
       - name: Validate market data parsers
-        run: python -m unittest discover -s tests -v
+        run: python -m unittest discover -s tests
 
       - name: Fetch market data
         shell: bash
@@ -42,3 +43,10 @@ jobs:
           else
             python fetch_market_data.py
           fi
+
+      - name: Send market data to LINE
+        if: ${{ inputs.market_date == '' }}
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: python send_line.py
