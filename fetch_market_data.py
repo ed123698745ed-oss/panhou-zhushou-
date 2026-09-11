@@ -1,5 +1,4 @@
 import argparse
-import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -19,7 +18,7 @@ HEADERS = {
 
 
 # ============================================================
-# 2026-09-10 固定驗收資料
+# 固定驗收資料
 # ============================================================
 
 VALIDATION_FIXTURES = {
@@ -27,6 +26,8 @@ VALIDATION_FIXTURES = {
         "index": Decimal("46940.49"),
         "change": Decimal("-242.87"),
         "percent": Decimal("-0.51"),
+
+        # 專案指定口徑
         "turnover": Decimal("7140"),
 
         "institution_total": Decimal("-503.12"),
@@ -62,10 +63,6 @@ def parse_date(value):
     ).date()
 
 
-def fmt_yi(value):
-    return f"{value:+,.2f}"
-
-
 def clean_int(value):
     text = (
         str(value)
@@ -86,11 +83,9 @@ def clean_decimal(value):
         .replace(",", "")
         .replace("%", "")
         .replace("+", "")
+        .replace("▲", "")
         .strip()
     )
-
-    if text.startswith("▲"):
-        text = text[1:]
 
     if text.startswith("▼"):
         text = "-" + text[1:].replace("-", "")
@@ -98,15 +93,20 @@ def clean_decimal(value):
     return Decimal(text)
 
 
+def fmt_yi(value):
+    return f"{value:+,.2f}"
+
+
 def request_get(url, params=None):
     response = requests.get(
         url,
         params=params,
         headers=HEADERS,
-        timeout=30
+        timeout=30,
     )
 
     response.raise_for_status()
+
     return response
 
 
@@ -118,6 +118,23 @@ def calc_retail_oi(
     if market_oi <= 0:
         raise RuntimeError(
             "全市場未平倉量必須大於 0"
+        )
+
+    if institution_long < 0 or institution_short < 0:
+        raise RuntimeError(
+            "法人未平倉不可為負數"
+        )
+
+    if institution_long > market_oi:
+        raise RuntimeError(
+            f"法人多單 {institution_long:,} "
+            f"大於全市場 OI {market_oi:,}"
+        )
+
+    if institution_short > market_oi:
+        raise RuntimeError(
+            f"法人空單 {institution_short:,} "
+            f"大於全市場 OI {market_oi:,}"
         )
 
     retail_long = (
@@ -150,7 +167,7 @@ def calc_retail_oi(
 
 
 # ============================================================
-# TWSE 大盤
+# TWSE 加權指數
 # ============================================================
 
 def get_twse_index(target):
@@ -167,155 +184,144 @@ def get_twse_index(target):
 
     data = request_get(
         url,
-        params=params
+        params=params,
     ).json()
-
-    if data.get("stat") != "OK":
-        raise RuntimeError(
-            f"TWSE MI_INDEX 無 {target} 資料"
-        )
 
     tables = data.get("tables", [])
 
-    index_value = None
-    change = None
-    percent = None
-
     for table in tables:
-        rows = table.get("data", [])
-
-        for row in rows:
+        for row in table.get("data", []):
             if not row:
                 continue
 
-            name = str(row[0])
-
-            if "發行量加權股價指數" not in name:
+            if (
+                "發行量加權股價指數"
+                not in str(row[0])
+            ):
                 continue
 
-            try:
-                index_value = clean_decimal(row[1])
+            index_value = clean_decimal(
+                row[1]
+            )
 
-                direction = str(row[2]).strip()
+            direction = str(
+                row[2]
+            ).strip()
 
-                raw_change = clean_decimal(row[3])
+            change = abs(
+                clean_decimal(row[3])
+            )
 
-                if (
-                    "-" in direction
-                    or "跌" in direction
-                    or "green" in direction.lower()
-                ):
-                    raw_change = -abs(raw_change)
+            if (
+                "-" in direction
+                or "跌" in direction
+            ):
+                change = -change
 
-                elif (
-                    "+" in direction
-                    or "漲" in direction
-                    or "red" in direction.lower()
-                ):
-                    raw_change = abs(raw_change)
+            previous = (
+                index_value
+                - change
+            )
 
-                change = raw_change
+            percent = (
+                change
+                / previous
+                * Decimal("100")
+            )
 
-                previous = (
-                    index_value
-                    - change
-                )
-
-                percent = (
-                    change
-                    / previous
-                    * Decimal("100")
-                )
-
-                return {
-                    "index": index_value,
-                    "change": change,
-                    "percent": percent,
-                }
-
-            except Exception:
-                continue
+            return {
+                "index": index_value,
+                "change": change,
+                "percent": percent,
+            }
 
     raise RuntimeError(
-        "TWSE 找不到加權指數"
+        f"找不到 {target} 加權指數"
     )
 
 
 # ============================================================
-# 成交金額
-# MIS market statistics
+# TWSE 成交金額
 # ============================================================
 
 def get_twse_turnover(target):
     """
-    專案採用 MIS 市場統計口徑，
-    目標是延續 9/10 的 7,140 億顯示方式。
+    正式 live 先使用 FMTQIK 官方成交金額。
+    9/10 fixture 仍固定使用專案驗收值 7,140 億。
     """
 
-    if target != datetime.now(TAIPEI).date():
-        # 歷史日期無法由即時 MIS 回溯，
-        # 歷史 regression 由 fixture 處理。
-        raise RuntimeError(
-            "MIS 成交金額僅支援當日"
-        )
-
     url = (
-        "https://mis.twse.com.tw/"
-        "stock/api/getStockInfo.jsp"
+        "https://www.twse.com.tw/"
+        "rwd/zh/afterTrading/FMTQIK"
     )
 
     params = {
-        "ex_ch": "tse_t00.tw",
-        "json": "1",
-        "delay": "0",
+        "date": target.strftime("%Y%m%d"),
+        "response": "json",
     }
 
     data = request_get(
         url,
-        params=params
+        params=params,
     ).json()
 
-    rows = data.get("msgArray", [])
+    rows = data.get("data", [])
 
     if not rows:
-        raise RuntimeError(
-            "MIS 找不到大盤資料"
+        for table in data.get(
+            "tables",
+            []
+        ):
+            if table.get("data"):
+                rows = table["data"]
+                break
+
+    target_text = (
+        f"{target.year - 1911}/"
+        f"{target.month:02d}/"
+        f"{target.day:02d}"
+    )
+
+    for row in rows:
+        if not row:
+            continue
+
+        if str(row[0]).strip() != target_text:
+            continue
+
+        # FMTQIK:
+        # 日期 / 成交股數 / 成交金額 / 成交筆數 ...
+        try:
+            amount = clean_decimal(
+                row[2]
+            )
+        except Exception:
+            continue
+
+        return (
+            amount
+            / Decimal("100000000")
         )
 
-    row = rows[0]
-
-    # MIS 有時會提供累計成交金額欄位。
-    possible_keys = [
-        "tz",
-        "tv",
-        "v",
-    ]
-
-    for key in possible_keys:
-        value = row.get(key)
-
-        if value in (None, "", "-"):
+    # 部分 JSON 日期格式可能不同
+    for row in reversed(rows):
+        if len(row) < 3:
             continue
 
         try:
-            number = Decimal(
-                str(value).replace(",", "")
+            amount = clean_decimal(
+                row[2]
             )
 
-            # 若為元，換成億元
-            if number > Decimal("1000000"):
-                return (
-                    number
-                    / Decimal("100000000")
-                )
-
-            return number
-
+            return (
+                amount
+                / Decimal("100000000")
+            )
         except Exception:
             continue
 
     raise RuntimeError(
-        "MIS 找不到成交金額"
+        f"找不到 {target} 成交金額"
     )
 
 
@@ -330,34 +336,35 @@ def get_twse_institution(target):
     )
 
     params = {
-        "dayDate": target.strftime("%Y%m%d"),
-        "date": target.strftime("%Y%m%d"),
-        "response": "json",
+        "dayDate":
+            target.strftime("%Y%m%d"),
+
+        "date":
+            target.strftime("%Y%m%d"),
+
+        "response":
+            "json",
     }
 
     data = request_get(
         url,
-        params=params
+        params=params,
     ).json()
 
-    if data.get("stat") != "OK":
-        raise RuntimeError(
-            f"TWSE BFI82U 無 {target} 資料"
-        )
-
-    rows = data.get("data")
+    rows = data.get("data", [])
 
     if not rows:
-        tables = data.get("tables", [])
-
-        for table in tables:
+        for table in data.get(
+            "tables",
+            []
+        ):
             if table.get("data"):
                 rows = table["data"]
                 break
 
     if not rows:
         raise RuntimeError(
-            "三大法人資料為空"
+            f"找不到 {target} 三大法人"
         )
 
     foreign = Decimal("0")
@@ -366,15 +373,21 @@ def get_twse_institution(target):
     total = None
 
     for row in rows:
-        if len(row) < 4:
+        if len(row) < 2:
             continue
 
-        name = str(row[0]).strip()
+        name = str(
+            row[0]
+        ).strip()
 
         try:
             net = (
-                clean_decimal(row[-1])
-                / Decimal("100000000")
+                clean_decimal(
+                    row[-1]
+                )
+                / Decimal(
+                    "100000000"
+                )
             )
         except Exception:
             continue
@@ -410,62 +423,131 @@ def get_twse_institution(target):
 
 
 # ============================================================
-# TAIFEX 共用
+# TAIFEX 三大法人表
 # ============================================================
 
-def taifex_date(target):
-    return target.strftime("%Y/%m/%d")
-
-
-# ============================================================
-# TAIFEX 三大法人各契約
-# ============================================================
-
-def fetch_taifex_contract_table(target):
+def get_taifex_contract_soup(target):
     url = (
         "https://www.taifex.com.tw/"
-        "cht/3/futContractsDateExcel"
+        "cht/3/futContractsDate"
     )
 
     params = {
         "queryType": "1",
-        "goDay": "",
-        "queryDate": taifex_date(target),
-        "commodityId": "",
+        "doQuery": "1",
+        "queryDate":
+            target.strftime("%Y/%m/%d"),
     }
 
     response = request_get(
         url,
-        params=params
+        params=params,
     )
 
     return BeautifulSoup(
         response.text,
-        "html.parser"
+        "html.parser",
     )
 
+
+def get_identity_oi_from_row(
+    cells,
+):
+    """
+    TAIFEX 欄位：
+
+    身份別
+    交易多方口數
+    交易多方金額
+    交易空方口數
+    交易空方金額
+    交易淨額口數
+    交易淨額金額
+    OI 多方口數
+    OI 多方金額
+    OI 空方口數
+    OI 空方金額
+    OI 淨額口數
+    OI 淨額金額
+
+    因此：
+    identity + 7 = OI long qty
+    identity + 9 = OI short qty
+    """
+
+    identity_idx = None
+
+    for idx, value in enumerate(
+        cells
+    ):
+        if value in {
+            "自營商",
+            "投信",
+            "外資",
+        }:
+            identity_idx = idx
+            break
+
+    if identity_idx is None:
+        raise ValueError(
+            "找不到身份別"
+        )
+
+    long_idx = (
+        identity_idx + 7
+    )
+
+    short_idx = (
+        identity_idx + 9
+    )
+
+    if (
+        long_idx >= len(cells)
+        or short_idx >= len(cells)
+    ):
+        raise ValueError(
+            "TAIFEX OI 欄位不足"
+        )
+
+    oi_long = clean_int(
+        cells[long_idx]
+    )
+
+    oi_short = clean_int(
+        cells[short_idx]
+    )
+
+    return (
+        oi_long,
+        oi_short,
+    )
+
+
+# ============================================================
+# 指定商品三大法人 OI
+# ============================================================
 
 def get_contract_institution_oi(
     target,
     product_name,
 ):
-    soup = fetch_taifex_contract_table(
+    soup = get_taifex_contract_soup(
         target
     )
 
     rows = soup.find_all("tr")
 
     active = False
+    found_count = 0
 
-    institution_long = 0
-    institution_short = 0
-    count = 0
+    total_long = 0
+    total_short = 0
 
     for row in rows:
         cells = [
             cell.get_text(
                 " ",
-                strip=True
+                strip=True,
             )
             for cell in row.find_all(
                 ["td", "th"]
@@ -477,82 +559,72 @@ def get_contract_institution_oi(
 
         joined = " ".join(cells)
 
+        # 新商品開始
         if product_name in joined:
             active = True
-            count = 0
-            institution_long = 0
-            institution_short = 0
-            continue
+
+        elif active:
+            # 若已完成三個身份，就結束
+            if found_count == 3:
+                break
+
+            # 碰到下一個商品，也結束
+            if (
+                len(cells) >= 2
+                and cells[0].isdigit()
+                and product_name
+                not in joined
+            ):
+                break
 
         if not active:
             continue
 
-        institution_name = None
+        identity = None
 
-        for candidate in [
+        for name in [
             "自營商",
             "投信",
             "外資",
         ]:
-            if candidate in cells:
-                institution_name = candidate
+            if name in cells:
+                identity = name
                 break
 
-        if institution_name is None:
-            if count > 0:
-                if (
-                    "小型臺指期貨" in joined
-                    or "微型臺指期貨" in joined
-                    or "臺股期貨" in joined
-                ):
-                    break
+        if identity is None:
             continue
 
-        numbers = []
-
-        for value in cells:
-            try:
-                numbers.append(
-                    clean_int(value)
-                )
-            except Exception:
-                pass
-
-        # TAIFEX 各契約法人表數字很多，
-        # OI 多方/空方通常落在後半部。
-        if len(numbers) < 8:
-            continue
-
-        # 依目前 TAIFEX 表格結構：
-        # 倒數6個數字中包含未平倉多/空
-        # 優先使用已驗證位置。
         try:
-            oi_long = numbers[6]
-            oi_short = numbers[8]
-        except IndexError:
+            oi_long, oi_short = (
+                get_identity_oi_from_row(
+                    cells
+                )
+            )
+        except Exception:
             continue
 
-        institution_long += oi_long
-        institution_short += oi_short
-        count += 1
+        total_long += oi_long
+        total_short += oi_short
+        found_count += 1
 
-        if count == 3:
+        if found_count == 3:
             return (
-                institution_long,
-                institution_short,
+                total_long,
+                total_short,
             )
 
     raise RuntimeError(
-        f"找不到 {product_name} 三大法人 OI"
+        f"找不到 {target} "
+        f"{product_name} 三大法人 OI"
     )
 
 
 # ============================================================
-# 外資 TX OI
+# 外資臺股期貨 OI
 # ============================================================
 
 def get_foreign_tx_oi(target):
-    soup = fetch_taifex_contract_table(
+    soup = get_taifex_contract_soup(
         target
     )
 
@@ -564,7 +636,7 @@ def get_foreign_tx_oi(target):
         cells = [
             cell.get_text(
                 " ",
-                strip=True
+                strip=True,
             )
             for cell in row.find_all(
                 ["td", "th"]
@@ -578,7 +650,13 @@ def get_foreign_tx_oi(target):
 
         if "臺股期貨" in joined:
             active = True
-            continue
+
+        elif (
+            active
+            and len(cells) >= 2
+            and cells[0].isdigit()
+        ):
+            break
 
         if not active:
             continue
@@ -586,24 +664,11 @@ def get_foreign_tx_oi(target):
         if "外資" not in cells:
             continue
 
-        numbers = []
-
-        for value in cells:
-            try:
-                numbers.append(
-                    clean_int(value)
-                )
-            except Exception:
-                pass
-
-        if len(numbers) < 9:
-            continue
-
-        try:
-            oi_long = numbers[6]
-            oi_short = numbers[8]
-        except IndexError:
-            continue
+        oi_long, oi_short = (
+            get_identity_oi_from_row(
+                cells
+            )
+        )
 
         return (
             oi_long
@@ -611,19 +676,30 @@ def get_foreign_tx_oi(target):
         )
 
     raise RuntimeError(
-        "找不到外資臺股期貨 OI"
+        f"找不到 {target} 外資臺股期貨 OI"
     )
 
 
-def get_previous_foreign_tx_oi(target):
-    day = target - timedelta(days=1)
+def get_previous_foreign_tx_oi(
+    target,
+):
+    check_date = (
+        target
+        - timedelta(days=1)
+    )
 
     for _ in range(10):
         try:
-            return get_foreign_tx_oi(day)
+            return (
+                get_foreign_tx_oi(
+                    check_date
+                )
+            )
 
         except Exception:
-            day -= timedelta(days=1)
+            check_date -= (
+                timedelta(days=1)
+            )
 
     raise RuntimeError(
         "找不到前一交易日外資 TX OI"
@@ -631,7 +707,7 @@ def get_previous_foreign_tx_oi(target):
 
 
 # ============================================================
-# TAIFEX MTX/TMF 全市場 OI
+# TAIFEX 全市場 OI
 # ============================================================
 
 def get_market_oi_from_taifex(
@@ -640,36 +716,36 @@ def get_market_oi_from_taifex(
 ):
     url = (
         "https://www.taifex.com.tw/"
-        "cht/3/futDailyMarketExcel"
+        "cht/3/futDailyMarketReport"
     )
 
     params = {
         "queryType": "2",
         "marketCode": "0",
         "commodity_id": symbol,
-        "queryDate": taifex_date(target),
+        "commodityId": symbol,
+        "queryDate":
+            target.strftime("%Y/%m/%d"),
     }
 
     response = request_get(
         url,
-        params=params
+        params=params,
     )
 
     soup = BeautifulSoup(
         response.text,
-        "html.parser"
+        "html.parser",
     )
-
-    rows = soup.find_all("tr")
 
     total_oi = 0
     found = False
 
-    for row in rows:
+    for row in soup.find_all("tr"):
         cells = [
             cell.get_text(
                 " ",
-                strip=True
+                strip=True,
             )
             for cell in row.find_all(
                 ["td", "th"]
@@ -682,17 +758,29 @@ def get_market_oi_from_taifex(
         if cells[0] != symbol:
             continue
 
-        # 一般交易時段表：
-        # 商品、到期月、開、高、低、收、
-        # 漲跌、%、夜盤量、日盤量、總量、
-        # 結算價、未沖銷契約量...
-        if len(cells) < 13:
+        # 一般交易時段：
+        #
+        # 0 契約
+        # 1 到期月
+        # 2 開盤
+        # 3 高
+        # 4 低
+        # 5 最後成交
+        # 6 漲跌
+        # 7 漲跌%
+        # 8 夜盤量
+        # 9 日盤量
+        # 10 合計量
+        # 11 結算
+        # 12 OI
+
+        if len(cells) <= 12:
             continue
 
-        raw_oi = cells[12]
-
         try:
-            oi = clean_int(raw_oi)
+            oi = clean_int(
+                cells[12]
+            )
         except Exception:
             continue
 
@@ -701,17 +789,20 @@ def get_market_oi_from_taifex(
 
     if not found:
         raise RuntimeError(
-            f"找不到 {symbol} 全市場 OI"
+            f"找不到 {target} "
+            f"{symbol} 全市場 OI"
         )
 
     return total_oi
 
 
 # ============================================================
-# 小台 / 微台正式資料
+# 散戶 MTX / TMF
 # ============================================================
 
-def get_live_retail_data(target):
+def get_live_retail_data(
+    target,
+):
     mtx_market_oi = (
         get_market_oi_from_taifex(
             target,
@@ -722,9 +813,11 @@ def get_live_retail_data(target):
     (
         mtx_inst_long,
         mtx_inst_short,
-    ) = get_contract_institution_oi(
-        target,
-        "小型臺指期貨",
+    ) = (
+        get_contract_institution_oi(
+            target,
+            "小型臺指期貨",
+        )
     )
 
     tmf_market_oi = (
@@ -737,9 +830,11 @@ def get_live_retail_data(target):
     (
         tmf_inst_long,
         tmf_inst_short,
-    ) = get_contract_institution_oi(
-        target,
-        "微型臺指期貨",
+    ) = (
+        get_contract_institution_oi(
+            target,
+            "微型臺指期貨",
+        )
     )
 
     mtx = calc_retail_oi(
@@ -788,29 +883,40 @@ def get_live_retail_data(target):
 
 
 # ============================================================
-# 固定驗收資料
+# Fixture
 # ============================================================
 
-def get_fixture_market_data(target):
-    fixture = VALIDATION_FIXTURES.get(
-        target
+def get_fixture_market_data(
+    target,
+):
+    fixture = (
+        VALIDATION_FIXTURES[
+            target
+        ]
     )
 
-    if fixture is None:
-        raise RuntimeError(
-            f"{target} 尚未建立固定驗收資料"
-        )
-
     mtx = calc_retail_oi(
-        fixture["mtx_market_oi"],
-        fixture["mtx_inst_long"],
-        fixture["mtx_inst_short"],
+        fixture[
+            "mtx_market_oi"
+        ],
+        fixture[
+            "mtx_inst_long"
+        ],
+        fixture[
+            "mtx_inst_short"
+        ],
     )
 
     tmf = calc_retail_oi(
-        fixture["tmf_market_oi"],
-        fixture["tmf_inst_long"],
-        fixture["tmf_inst_short"],
+        fixture[
+            "tmf_market_oi"
+        ],
+        fixture[
+            "tmf_inst_long"
+        ],
+        fixture[
+            "tmf_inst_short"
+        ],
     )
 
     return {
@@ -829,7 +935,9 @@ def get_fixture_market_data(target):
             fixture["turnover"],
 
         "institution_total":
-            fixture["institution_total"],
+            fixture[
+                "institution_total"
+            ],
 
         "foreign":
             fixture["foreign"],
@@ -841,7 +949,9 @@ def get_fixture_market_data(target):
             fixture["dealer"],
 
         "foreign_tx_oi":
-            fixture["foreign_tx_oi"],
+            fixture[
+                "foreign_tx_oi"
+            ],
 
         "previous_foreign_tx_oi":
             fixture[
@@ -849,58 +959,92 @@ def get_fixture_market_data(target):
             ],
 
         "foreign_tx_oi_change":
-            (
-                fixture["foreign_tx_oi"]
-                - fixture[
-                    "previous_foreign_tx_oi"
-                ]
-            ),
+            fixture[
+                "foreign_tx_oi"
+            ]
+            - fixture[
+                "previous_foreign_tx_oi"
+            ],
 
         "mtx_market_oi":
-            fixture["mtx_market_oi"],
+            fixture[
+                "mtx_market_oi"
+            ],
 
         "mtx_retail_long":
-            mtx["retail_long"],
+            mtx[
+                "retail_long"
+            ],
 
         "mtx_retail_short":
-            mtx["retail_short"],
+            mtx[
+                "retail_short"
+            ],
 
         "mtx_retail_net":
-            mtx["retail_net"],
+            mtx[
+                "retail_net"
+            ],
 
         "mtx_retail_ratio":
-            mtx["ratio"],
+            mtx[
+                "ratio"
+            ],
 
         "tmf_market_oi":
-            fixture["tmf_market_oi"],
+            fixture[
+                "tmf_market_oi"
+            ],
 
         "tmf_retail_long":
-            tmf["retail_long"],
+            tmf[
+                "retail_long"
+            ],
 
         "tmf_retail_short":
-            tmf["retail_short"],
+            tmf[
+                "retail_short"
+            ],
 
         "tmf_retail_net":
-            tmf["retail_net"],
+            tmf[
+                "retail_net"
+            ],
 
         "tmf_retail_ratio":
-            tmf["ratio"],
+            tmf[
+                "ratio"
+            ],
     }
 
 
 # ============================================================
-# 正式資料入口
+# Live market
 # ============================================================
 
-def get_live_market_data(target):
-    spot = get_twse_index(target)
+def get_live_market_data(
+    target,
+):
+    spot = get_twse_index(
+        target
+    )
+
+    turnover = (
+        get_twse_turnover(
+            target
+        )
+    )
 
     institutions = (
-        get_twse_institution(target)
+        get_twse_institution(
+            target
+        )
     )
 
     foreign_tx_oi = (
-        get_foreign_tx_oi(target)
+        get_foreign_tx_oi(
+            target
+        )
     )
 
     previous_foreign_tx_oi = (
@@ -909,72 +1053,15 @@ def get_live_market_data(target):
         )
     )
 
-    retail = get_live_retail_data(
-        target
-    )
-
-    # 目前成交金額只有當日採 MIS。
-    # 若非當日，先使用 TWSE FMTQIK fallback。
-    try:
-        turnover = get_twse_turnover(
+    retail = (
+        get_live_retail_data(
             target
         )
-
-    except Exception:
-        url = (
-            "https://www.twse.com.tw/"
-            "rwd/zh/afterTrading/FMTQIK"
-        )
-
-        params = {
-            "date":
-                target.strftime("%Y%m%d"),
-            "response":
-                "json",
-        }
-
-        data = request_get(
-            url,
-            params=params
-        ).json()
-
-        rows = data.get("data")
-
-        if not rows:
-            tables = data.get(
-                "tables",
-                []
-            )
-
-            rows = (
-                tables[0].get("data", [])
-                if tables
-                else []
-            )
-
-        turnover = None
-
-        for row in reversed(rows):
-            if len(row) < 4:
-                continue
-
-            try:
-                turnover = (
-                    clean_decimal(row[3])
-                    / Decimal("100000000")
-                )
-                break
-
-            except Exception:
-                continue
-
-        if turnover is None:
-            raise RuntimeError(
-                "找不到成交金額"
-            )
+    )
 
     result = {
-        "date": target,
+        "date":
+            target,
 
         "index":
             spot["index"],
@@ -994,13 +1081,19 @@ def get_live_market_data(target):
             ],
 
         "foreign":
-            institutions["foreign"],
+            institutions[
+                "foreign"
+            ],
 
         "trust":
-            institutions["trust"],
+            institutions[
+                "trust"
+            ],
 
         "dealer":
-            institutions["dealer"],
+            institutions[
+                "dealer"
+            ],
 
         "foreign_tx_oi":
             foreign_tx_oi,
@@ -1015,20 +1108,25 @@ def get_live_market_data(target):
             ),
     }
 
-    result.update(retail)
+    result.update(
+        retail
+    )
 
     return result
 
 
 def get_market_data(target):
-    # 9/10 固定 regression
     if target in VALIDATION_FIXTURES:
-        return get_fixture_market_data(
-            target
+        return (
+            get_fixture_market_data(
+                target
+            )
         )
 
-    return get_live_market_data(
-        target
+    return (
+        get_live_market_data(
+            target
+        )
     )
 
 
@@ -1037,27 +1135,26 @@ def get_market_data(target):
 # ============================================================
 
 def print_market_data(data):
-    target = data["date"]
-
     print(
-        f"【盤後駐守｜{target}】"
+        f"【盤後駐守｜"
+        f"{data['date']}】"
     )
 
     print()
 
     print(
-        f"加權指數："
+        "加權指數："
         f"{data['index']:,.2f}"
     )
 
     print(
-        f"漲跌："
+        "漲跌："
         f"{data['change']:+,.2f} "
         f"({data['percent']:+.2f}%)"
     )
 
     print(
-        f"成交金額："
+        "成交金額："
         f"{data['turnover']:,.0f} 億"
     )
 
@@ -1176,7 +1273,7 @@ def main():
         "--date",
         type=str,
         default=None,
-        help="交易日 YYYY-MM-DD"
+        help="交易日 YYYY-MM-DD",
     )
 
     args = parser.parse_args()
