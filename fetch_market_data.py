@@ -241,98 +241,28 @@ def get_twse_index(target):
 
 
 # ============================================================
-# TWSE 成交金額
+# TWSE 成交金額（對齊券商 POW00「總量」口徑）
 # ============================================================
+
 def get_twse_turnover(target):
     """
-    盤後駐守使用「大盤即時成交金額」口徑，
-    目標對齊券商 POW00 顯示：
-    2026-09-10 約 7,140 億
-    2026-09-11 約 7,219 億
+    來源：TWSE MI_5MINS（每5秒委託成交統計）最後一筆 13:30:00 的「累積成交金額」。
+    口徑：整體市場一般交易（股票+基金+權證等），
+          不含零股、鉅額、盤後定價、拍賣、標購 —— 與券商 POW00 總量相同。
+    單位：百萬元 → 除以 100 = 億元。
+    驗證：2026-09-10 = 713,972 百萬 = 7,139.72 億；
+          2026-09-11 = 721,908 百萬 = 7,219.08 億。
+    注意：FMTQIK 的成交金額含零股／盤後定價／鉅額，會比券商多（9/10 多 367 億、9/11 多 403 億），勿混用。
     """
-
-    today = datetime.now(TAIPEI).date()
-
-    # MIS 只能可靠取得當日資料
-    if target == today:
-        url = (
-            "https://mis.twse.com.tw/"
-            "stock/api/getStatis.jsp"
-        )
-
-        params = {
-            "ex": "tse",
-        }
-
-        response = request_get(
-            url,
-            params=params,
-        )
-
-        data = response.json()
-
-        print("=== MIS DEBUG START ===")
-        print(data)
-        print("=== MIS DEBUG END ===")
-
-        rows = data.get("msgArray", [])
-
-        for row in rows:
-            # 優先找大盤成交金額相關欄位
-            for key in [
-                "tz",
-                "ta",
-                "tv",
-    
-            ]:
-                value = row.get(key)
-
-                if value in (
-                    None,
-                    "",
-                    "-",
-                ):
-                    continue
-
-                try:
-                    number = Decimal(
-                        str(value)
-                        .replace(",", "")
-                    )
-                except Exception:
-                    continue
-
-                # 若原始值是「元」
-                if number > Decimal(
-                    "100000000"
-                ):
-                    return (
-                        number
-                        / Decimal(
-                            "100000000"
-                        )
-                    )
-
-                # 若已經是億元
-                if number > Decimal("1000"):
-                    return number
-
-    # --------------------------------------------------------
-    # 歷史日期：
-    # 9/10 已有固定 fixture，不會走到這裡。
-    # 其他歷史日期暫時 fallback 到 FMTQIK。
-    # --------------------------------------------------------
 
     url = (
         "https://www.twse.com.tw/"
-        "rwd/zh/afterTrading/FMTQIK"
+        "rwd/zh/afterTrading/MI_5MINS"
     )
 
     params = {
-        "date":
-            target.strftime("%Y%m%d"),
-        "response":
-            "json",
+        "date": target.strftime("%Y%m%d"),
+        "response": "json",
     }
 
     data = request_get(
@@ -340,34 +270,43 @@ def get_twse_turnover(target):
         params=params,
     ).json()
 
+    if data.get("stat") != "OK":
+        raise RuntimeError(
+            f"MI_5MINS {target} 無資料：{data.get('stat')}"
+        )
+
+    fields = data.get("fields", [])
     rows = data.get("data", [])
 
     if not rows:
-        for table in data.get(
-            "tables",
-            []
-        ):
-            if table.get("data"):
-                rows = table["data"]
-                break
+        raise RuntimeError(
+            f"MI_5MINS {target} 無資料列"
+        )
 
-    for row in reversed(rows):
-        if len(row) < 3:
-            continue
+    try:
+        amount_idx = fields.index("累積成交金額")
+    except ValueError:
+        raise RuntimeError(
+            f"MI_5MINS 欄位變動，找不到「累積成交金額」：{fields}"
+        )
 
-        try:
-            amount = (
-                clean_decimal(row[2])
-                / Decimal("100000000")
-            )
+    # 取最後一筆（正常為 13:30:00 收盤撮合後）
+    last = rows[-1]
 
-            return amount
+    if not str(last[0]).startswith("13:30"):
+        # 資料尚未更新到收盤，或遇到特殊交易時段
+        print(
+            f"[警告] MI_5MINS 最後時間為 {last[0]}，"
+            "非 13:30:00，成交金額可能不完整"
+        )
 
-        except Exception:
-            continue
+    amount_million = clean_decimal(
+        last[amount_idx]
+    )
 
-    raise RuntimeError(
-        f"找不到 {target} 成交金額"
+    return (
+        amount_million
+        / Decimal("100")
     )
 
 
