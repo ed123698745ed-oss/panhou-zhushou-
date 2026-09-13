@@ -34,9 +34,17 @@ TWSE_FIELDS = ["index_close", "foreign", "foreign_dealer", "trust",
                "dealer_self", "dealer_hedge", "total"]
 TAIFEX_FIELDS = ["mtx_market_oi", "mtx_retail_long", "mtx_retail_short", "mtx_retail_ratio",
                  "tmf_market_oi", "tmf_retail_long", "tmf_retail_short", "tmf_retail_ratio"]
-FIELDS = ["date"] + TWSE_FIELDS + TAIFEX_FIELDS
+MARGIN_FIELDS = ["margin_balance"]
+FIELDS = ["date"] + TWSE_FIELDS + TAIFEX_FIELDS + MARGIN_FIELDS
 
-CHART_NEEDS = {"foreign": [], "mtx": ["taifex"]}
+# 每張圖需要哪些資料來源
+CHART_NEEDS = {
+    "foreign": [],
+    "dealer":  [],
+    "mtx":     ["taifex"],
+    "tmf":     ["taifex"],
+    "margin":  ["margin"],
+}
 
 C_UP, C_DOWN = "#D94B4B", "#2E9E6B"
 C_LINE, C_TITLE = "#16181D", "#1E5AA8"
@@ -85,6 +93,24 @@ def fetch_bfi(date):
             err = e
             time.sleep(4)
     raise RuntimeError(f"BFI82U {date} 失敗: {err}")
+
+
+def fetch_margin(date):
+    """
+    上市融資餘額。來源：TWSE MI_MARGN（selectType=MS）信用交易統計表，
+    取「融資金額(仟元)」的「今日餘額」。單位：仟元 ÷ 100000 = 億元。
+    尚未公布時回傳 None（不視為錯誤）。
+    """
+    ymd = date.replace("-", "")
+    d = S.get("https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN"
+              f"?date={ymd}&selectType=MS&response=json", timeout=30).json()
+    if d.get("stat") != "OK":
+        return None
+    for t in d.get("tables", []):
+        for row in t.get("data", []) or []:
+            if row and "融資金額" in str(row[0]):
+                return round(float(str(row[-1]).replace(",", "")) / 1e5, 2)
+    return None
 
 
 def calendar_back_from(end_date, need):
@@ -202,7 +228,7 @@ def _missing(row, fields):
     return any(str(row.get(f, "")).strip() == "" for f in fields)
 
 
-def ensure_history(end_date, need_taifex, max_fetch=None):
+def ensure_history(end_date, need_taifex, need_margin=False, max_fetch=None):
     rows = {r["date"]: dict(r) for r in load_history()}
     log(f"[歷史] 既有 {len(rows)} 筆")
 
@@ -218,11 +244,14 @@ def ensure_history(end_date, need_taifex, max_fetch=None):
         r = rows.get(d, {})
         nt = _missing(r, TWSE_FIELDS)
         nf = need_taifex and _missing(r, TAIFEX_FIELDS)
-        if nt or nf:
-            todo.append((d, nt, nf))
+        nm = need_margin and _missing(r, MARGIN_FIELDS)
+        if nt or nf or nm:
+            todo.append((d, nt, nf, nm))
 
     log(f"[歷史] 視窗 {len(want)} 天，待補 {len(todo)} 天"
-        f"（TWSE {sum(1 for t in todo if t[1])}、TAIFEX {sum(1 for t in todo if t[2])}）")
+        f"（TWSE {sum(1 for t in todo if t[1])}"
+        f"、TAIFEX {sum(1 for t in todo if t[2])}"
+        f"、融資 {sum(1 for t in todo if t[3])}）")
 
     if max_fetch and len(todo) > max_fetch:
         log(f"[限制] 本次只補前 {max_fetch} 天")
@@ -230,11 +259,16 @@ def ensure_history(end_date, need_taifex, max_fetch=None):
 
     done = 0
     try:
-        for i, (d, nt, nf) in enumerate(todo):
+        for i, (d, nt, nf, nm) in enumerate(todo):
             row = rows.get(d) or {"date": d}
             if nt:
                 row["index_close"] = idx[d]
                 row.update(fetch_bfi(d))
+                time.sleep(1.2)
+            if nm:
+                mb = fetch_margin(d)
+                # 尚未公布就留空字串，圖表會自動略過尾端缺漏
+                row["margin_balance"] = "" if mb is None else mb
                 time.sleep(1.2)
             if nf:
                 row.update(fetch_taifex(d))
@@ -275,7 +309,7 @@ def load_fonts():
 def nice_step(raw):
     e = math.floor(math.log10(raw)) if raw > 0 else 0
     base = raw / (10 ** e)
-    for m in (1, 2, 2.5, 5, 10):
+    for m in (1, 1.5, 2, 2.5, 3, 5, 10):
         if base <= m:
             return m * (10 ** e)
     return 10 ** (e + 1)
@@ -365,100 +399,93 @@ def _save(fig):
     return buf.getvalue()
 
 
-# ---------------- 圖一：外資買賣超 ----------------
-def draw_foreign(rows):
+# ---------------- 繪圖：共用骨架 ----------------
+def _new_fig(top):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.ticker import MultipleLocator
-
-    f_reg, f_bold = load_fonts()
     plt.rcParams["axes.unicode_minus"] = False
+    fig = plt.figure(figsize=(12, 8.4), dpi=120, facecolor="white")
+    ax_i = fig.add_axes([0.085, 0.125, 0.835, top])
+    return fig, ax_i, ax_i.twinx()
 
+
+def _header(fig, title, value_text, color, rule_y, title_y, f_bold):
+    import matplotlib.pyplot as plt
+    fig.text(0.085, title_y, title, fontsize=30, color=C_TITLE,
+             va="center", ha="left", fontproperties=f_bold)
+    fig.text(0.920, title_y, value_text, fontsize=30, color=color,
+             va="center", ha="right", fontproperties=f_bold)
+    fig.add_artist(plt.Line2D([0.085, 0.920], [rule_y, rule_y],
+                              color="#2B2B2B", linewidth=1.6))
+
+
+def _base(ax_i, ax_b, f_reg, dates, idx, L_LO, L_HI, n):
+    from matplotlib.ticker import MultipleLocator
+    ax_i.set_ylim(L_LO, L_HI)
+    ax_i.set_axisbelow(True)
+    ax_i.yaxis.set_major_locator(MultipleLocator((L_HI - L_LO) / 10))
+    ax_i.grid(axis="y", color=C_GRID, linewidth=0.9, zorder=0)
+    ax_i.plot(range(n), idx, color=C_LINE, linewidth=1.9, zorder=3,
+              solid_joinstyle="round", solid_capstyle="round")
+    _style_axes(ax_i, ax_b, f_reg, dates, n)
+
+
+# ---------------- 型態一：買賣超（對稱零軸，正紅負綠） ----------------
+def draw_flow(rows, title, values, source):
+    f_reg, f_bold = load_fonts()
     dates = [r["date"] for r in rows]
     idx = [float(r["index_close"]) for r in rows]
-    bar = [float(r["foreign"]) for r in rows]
+    bar = values
     n = len(rows)
 
     L_LO, L_HI = index_axis(idx)
     R = math.ceil(max(abs(v) for v in bar) * 1.06 / 500) * 500
 
-    fig = plt.figure(figsize=(12, 8.4), dpi=120, facecolor="white")
-    ax_i = fig.add_axes([0.085, 0.125, 0.835, 0.700])
-    ax_b = ax_i.twinx()
-    ax_i.set_ylim(L_LO, L_HI)
+    fig, ax_i, ax_b = _new_fig(0.700)
     ax_b.set_ylim(-R, R)
-
-    x = list(range(n))
-    ax_i.yaxis.set_major_locator(MultipleLocator((L_HI - L_LO) / 10))
-    ax_i.grid(axis="y", color=C_GRID, linewidth=0.9, zorder=0)
     ax_b.axhline(0, color=C_ZERO, linewidth=1.1, zorder=1)
-    ax_b.bar(x, bar, width=0.72, zorder=2,
+    ax_b.bar(range(n), bar, width=0.72, zorder=2,
              color=[C_UP if v >= 0 else C_DOWN for v in bar])
-    ax_i.plot(x, idx, color=C_LINE, linewidth=1.9, zorder=3,
-              solid_joinstyle="round", solid_capstyle="round")
-
     rt = [-R + i * (2 * R / 10) for i in range(11)]
     ax_b.set_yticks(rt)
     ax_b.set_yticklabels([f"{'+' if v > 0 else ''}{v:,.0f}" for v in rt])
-    _style_axes(ax_i, ax_b, f_reg, dates, n)
+    _base(ax_i, ax_b, f_reg, dates, idx, L_LO, L_HI, n)
 
     last = bar[-1]
-    fig.text(0.085, 0.920, "外資買賣超(億元)", fontsize=30, color=C_TITLE,
-             va="center", ha="left", fontproperties=f_bold)
-    fig.text(0.920, 0.920, f"{last:+,.2f}", fontsize=30,
-             color=C_UP if last >= 0 else C_DOWN,
-             va="center", ha="right", fontproperties=f_bold)
-    fig.add_artist(plt.Line2D([0.085, 0.920], [0.862, 0.862], color="#2B2B2B", linewidth=1.6))
-    _footer(fig, dates, n, f_reg, "臺灣證券交易所（TWSE）")
+    _header(fig, title, f"{last:+,.2f}", C_UP if last >= 0 else C_DOWN,
+            0.862, 0.920, f_bold)
+    _footer(fig, dates, n, f_reg, source)
     return _save(fig)
 
 
-# ---------------- 圖二：小台散戶多空比 ----------------
-def draw_mtx_ratio(rows):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.ticker import MultipleLocator
-
+# ---------------- 型態二：散戶多空比（自適應軸、結算日虛線、多空單標籤） ----------------
+def draw_ratio(rows, title, values, long_key, short_key, source):
     f_reg, f_bold = load_fonts()
-    plt.rcParams["axes.unicode_minus"] = False
-
     dates = [r["date"] for r in rows]
     idx = [float(r["index_close"]) for r in rows]
-    bar = [float(r["mtx_retail_ratio"]) for r in rows]
+    bar = values
     n = len(rows)
 
     L_LO, L_HI = index_axis(idx)
-    R_LO, R_HI = nice_axis(min(bar), max(bar))
+    # 柱狀圖基準必須含 0，否則柱子從非零軸底長出會誇大變化
+    R_LO, R_HI = nice_axis(min(min(bar), 0), max(max(bar), 0))
 
-    fig = plt.figure(figsize=(12, 8.4), dpi=120, facecolor="white")
-    ax_i = fig.add_axes([0.085, 0.125, 0.835, 0.715])
-    ax_b = ax_i.twinx()
-    ax_i.set_ylim(L_LO, L_HI)
+    fig, ax_i, ax_b = _new_fig(0.715)
     ax_b.set_ylim(R_LO, R_HI)
-
-    x = list(range(n))
-    ax_i.yaxis.set_major_locator(MultipleLocator((L_HI - L_LO) / 10))
-    ax_i.grid(axis="y", color=C_GRID, linewidth=0.9, zorder=0)
-
     for sx in settlement_x(dates):
         ax_i.axvline(sx, color="#9E9E9E", linewidth=1.0,
                      linestyle=(0, (4, 4)), zorder=1)
-
     ax_b.axhline(0, color=C_ZERO, linewidth=1.1, zorder=1)
-    ax_b.bar(x, bar, width=0.72, zorder=2,
+    ax_b.bar(range(n), bar, width=0.72, zorder=2,
              color=[C_UP if v >= 0 else C_DOWN for v in bar])
-    ax_i.plot(x, idx, color=C_LINE, linewidth=1.9, zorder=3,
-              solid_joinstyle="round", solid_capstyle="round")
-
     step = (R_HI - R_LO) / 10
     rt = [R_LO + i * step for i in range(11)]
     ax_b.set_yticks(rt)
     ax_b.set_yticklabels([("0" if abs(v) < 1e-9 else f"{v:+g}%") for v in rt])
-    _style_axes(ax_i, ax_b, f_reg, dates, n)
+    _base(ax_i, ax_b, f_reg, dates, idx, L_LO, L_HI, n)
 
-    lg, sh = int(rows[-1]["mtx_retail_long"]), int(rows[-1]["mtx_retail_short"])
+    lg, sh = int(rows[-1][long_key]), int(rows[-1][short_key])
     for i, (lab, val, col) in enumerate((("散戶多單", lg, C_UP), ("散戶空單", sh, C_DOWN))):
         bx = 0.040 + i * 0.235
         ax_i.text(bx, 0.945, lab, transform=ax_i.transAxes, fontsize=12.5,
@@ -469,24 +496,101 @@ def draw_mtx_ratio(rows):
                   fontproperties=f_bold)
 
     last = bar[-1]
-    fig.text(0.085, 0.945, "小台散戶多空比", fontsize=30, color=C_TITLE,
-             va="center", ha="left", fontproperties=f_bold)
-    fig.text(0.920, 0.945, f"{last:+.2f}%", fontsize=30,
-             color=C_UP if last >= 0 else C_DOWN,
-             va="center", ha="right", fontproperties=f_bold)
+    _header(fig, title, f"{last:+.2f}%", C_UP if last >= 0 else C_DOWN,
+            0.898, 0.945, f_bold)
     fig.text(0.395, 0.952,
              "散戶多單 = 全市場 OI − 三大法人多單\n"
              "散戶空單 = 全市場 OI − 三大法人空單\n"
              "散戶多空比 =（散戶多單 − 散戶空單）/ 全市場 OI × 100%　·　虛線為結算日",
              fontsize=9.5, color="#7A7A7A", va="center", ha="left",
              linespacing=1.55, fontproperties=f_reg)
-    fig.add_artist(plt.Line2D([0.085, 0.920], [0.898, 0.898], color="#2B2B2B", linewidth=1.6))
-    _footer(fig, dates, n, f_reg, "臺灣期貨交易所（TAIFEX）、臺灣證券交易所（TWSE）")
+    _footer(fig, dates, n, f_reg, source)
     return _save(fig)
 
 
-DRAWERS = {"foreign": (draw_foreign, "外資買賣超"),
-           "mtx": (draw_mtx_ratio, "小台散戶多空比")}
+# ---------------- 型態三：存量（融資餘額，柱狀，比照永豐） ----------------
+C_LEVEL = "#E0AE45"
+
+
+def level_axis(lo, hi):
+    """
+    比照永豐：10 格、上緣進位到級距、下緣 = 上緣 − 10×級距。
+    級距取資料全距兩倍的十分之一，使軸底遠低於資料，降低柱高失真。
+    """
+    base = nice_step((hi - lo) * 2.0 / 10)
+    e = math.floor(math.log10(base))
+    cands = sorted({m * 10 ** ee for ee in (e, e + 1) for m in (1, 1.5, 2, 2.5, 3, 5, 10)})
+    for step in [c for c in cands if c >= base]:
+        top = math.ceil(hi / step) * step
+        bot = top - 10 * step
+        if bot <= lo:
+            return bot, top, step
+    raise RuntimeError("無法決定存量軸範圍")
+
+
+def draw_level(rows, title, key, source, lagged=False):
+    f_reg, f_bold = load_fonts()
+    rows = [r for r in rows if str(r.get(key, "")).strip() != ""]
+    if not rows:
+        raise SystemExit(f"{key} 沒有任何可用資料")
+
+    dates = [r["date"] for r in rows]
+    idx = [float(r["index_close"]) for r in rows]
+    val = [float(r[key]) for r in rows]
+    n = len(rows)
+
+    L_LO, L_HI = index_axis(idx)
+    R_LO, R_HI, step = level_axis(min(val), max(val))
+
+    fig, ax_i, ax_b = _new_fig(0.700)
+    ax_b.set_ylim(R_LO, R_HI)
+    ax_b.bar(range(n), [v - R_LO for v in val], bottom=R_LO,
+             width=0.74, color=C_LEVEL, zorder=2)
+    ax_b.set_yticks([R_LO + i * step for i in range(11)])
+    ax_b.set_yticklabels([f"{R_LO + i * step:,.0f}" for i in range(11)])
+    _base(ax_i, ax_b, f_reg, dates, idx, L_LO, L_HI, n)
+    ax_i.lines[-1].set_linewidth(2.2)          # 指數線加粗，避免被柱子吃掉
+
+    _header(fig, title, f"{val[-1]:,.1f}", C_TITLE, 0.862, 0.920, f_bold)
+    if lagged:
+        fig.text(0.415, 0.913, "圖表僅更新至前一交易日數據",
+                 fontsize=11.5, color=C_TITLE, va="center", ha="left",
+                 fontproperties=f_bold)
+    _footer(fig, dates, n, f_reg, source)
+    return _save(fig)
+
+
+# ---------------- 圖表註冊 ----------------
+SRC_TWSE = "臺灣證券交易所（TWSE）"
+SRC_BOTH = "臺灣期貨交易所（TAIFEX）、臺灣證券交易所（TWSE）"
+
+DRAWERS = {
+    "foreign": (lambda rs: draw_flow(
+        rs, "外資買賣超(億元)", [float(r["foreign"]) for r in rs], SRC_TWSE),
+        "外資買賣超"),
+
+    "dealer": (lambda rs: draw_flow(
+        rs, "自營買賣超(億元)",
+        # 自行買賣與避險各自四捨五入後相加，與永豐口徑一致
+        [round(float(r["dealer_self"]) + float(r["dealer_hedge"]), 2) for r in rs],
+        SRC_TWSE),
+        "自營買賣超"),
+
+    "mtx": (lambda rs: draw_ratio(
+        rs, "小台散戶多空比", [float(r["mtx_retail_ratio"]) for r in rs],
+        "mtx_retail_long", "mtx_retail_short", SRC_BOTH),
+        "小台散戶多空比"),
+
+    "tmf": (lambda rs: draw_ratio(
+        rs, "微台散戶多空比", [float(r["tmf_retail_ratio"]) for r in rs],
+        "tmf_retail_long", "tmf_retail_short", SRC_BOTH),
+        "微台散戶多空比"),
+
+    "margin": (lambda rs: draw_level(
+        rs, "上市融資餘額(億元)", "margin_balance", SRC_TWSE,
+        lagged=str(rs[-1].get("margin_balance", "")).strip() == ""),
+        "上市融資餘額"),
+}
 
 
 # ---------------- LINE ----------------
@@ -505,7 +609,8 @@ def line_push_images(urls):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date")
-    ap.add_argument("--chart", default="all", help="foreign / mtx / all")
+    ap.add_argument("--chart", default="all",
+                    help="foreign / dealer / mtx / tmf / margin / all（可逗號分隔）")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--max-fetch", type=int, default=None,
                     help="本次最多補幾天（回補分批用）")
@@ -518,13 +623,25 @@ def main():
 
     end = a.date or time.strftime("%Y-%m-%d", time.localtime(time.time() + 8 * 3600))
     need_taifex = any("taifex" in CHART_NEEDS[c] for c in charts)
-    log(f"[開始] 目標 {end}，圖表 {charts}，需要期交所資料：{need_taifex}")
+    need_margin = any("margin" in CHART_NEEDS[c] for c in charts)
+    log(f"[開始] 目標 {end}，圖表 {charts}"
+        f"（期交所：{need_taifex}、融資：{need_margin}）")
 
-    window = ensure_history(end, need_taifex, a.max_fetch)
+    window = ensure_history(end, need_taifex, need_margin, a.max_fetch)
     d = window[-1]["date"]
 
     for c in charts:
-        need = TAIFEX_FIELDS if "taifex" in CHART_NEEDS[c] else TWSE_FIELDS
+        srcs = CHART_NEEDS[c]
+        if "margin" in srcs:
+            # 融資餘額公布較晚，尾端缺漏屬正常，圖表會自動略過
+            have = [r for r in window if str(r.get("margin_balance", "")).strip()]
+            if len(have) < 20:
+                raise SystemExit(f"[中止] margin 只有 {len(have)} 天資料，不足以畫圖。"
+                                 "CSV 已存檔，再跑一次即可續補。")
+            if have[-1]["date"] != d:
+                log(f"[注意] 融資餘額最新只到 {have[-1]['date']}（{d} 尚未公布）")
+            continue
+        need = TAIFEX_FIELDS if "taifex" in srcs else TWSE_FIELDS
         short = [r["date"] for r in window if _missing(r, need)]
         if short:
             raise SystemExit(
