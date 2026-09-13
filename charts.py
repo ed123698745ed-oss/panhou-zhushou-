@@ -102,9 +102,42 @@ def calendar_back_from(end_date, need):
 
 
 # ---------------- TAIFEX（沿用 fetch_market_data） ----------------
+_FMD_PATCHED = False
+
+
+def _patch_fmd(fmd, gap=1.6):
+    """
+    期交所會限流（429）。fetch_market_data 每天要打 4 次，
+    這裡統一包一層：每次請求前固定間隔，遇 429 退讓重試。
+    """
+    global _FMD_PATCHED
+    if _FMD_PATCHED:
+        return
+    orig = fmd.request_get
+
+    def wrapped(url, params=None):
+        for attempt in range(6):
+            time.sleep(gap)
+            try:
+                return orig(url, params=params)
+            except requests.HTTPError as e:
+                code = getattr(e.response, "status_code", 0)
+                if code == 429:
+                    wait = 30 * (attempt + 1)
+                    log(f"    [429] 期交所限流，等 {wait}s 重試（第 {attempt+1} 次）")
+                    time.sleep(wait)
+                    continue
+                raise
+        raise RuntimeError("期交所連續回 429，本次放棄")
+
+    fmd.request_get = wrapped
+    _FMD_PATCHED = True
+
+
 def fetch_taifex(date):
     """呼叫既有的 get_live_retail_data，取小台／微台散戶資料。"""
     import fetch_market_data as fmd
+    _patch_fmd(fmd)
     t = Date(int(date[:4]), int(date[5:7]), int(date[8:10]))
     r = fmd.get_live_retail_data(t)
     return {
@@ -195,20 +228,28 @@ def ensure_history(end_date, need_taifex, max_fetch=None):
         log(f"[限制] 本次只補前 {max_fetch} 天")
         todo = todo[:max_fetch]
 
-    for i, (d, nt, nf) in enumerate(todo):
-        row = rows.get(d) or {"date": d}
-        if nt:
-            row["index_close"] = idx[d]
-            row.update(fetch_bfi(d))
-            time.sleep(1.2)
-        if nf:
-            row.update(fetch_taifex(d))
-            time.sleep(1.0)
-        rows[d] = row
-        log(f"  補 {i+1}/{len(todo)} {d}")
-        if (i + 1) % 10 == 0 and i + 1 < len(todo):
+    done = 0
+    try:
+        for i, (d, nt, nf) in enumerate(todo):
+            row = rows.get(d) or {"date": d}
+            if nt:
+                row["index_close"] = idx[d]
+                row.update(fetch_bfi(d))
+                time.sleep(1.2)
+            if nf:
+                row.update(fetch_taifex(d))
+            rows[d] = row
+            done = i + 1
+            log(f"  補 {done}/{len(todo)} {d}")
+            if done % 5 == 0 and done < len(todo):
+                save_history(rows)
+                log(f"  [存檔] 已完成 {done} 天")
+    except BaseException as e:
+        if done:
             save_history(rows)
-            log(f"  [存檔] 已完成 {i+1} 天")
+            log(f"  [存檔] 中斷前已保住 {done} 天")
+        log(f"[中斷] {type(e).__name__}: {e}")
+        raise SystemExit("抓取中斷，進度已存檔。再跑一次即可從斷點續補。")
 
     if todo:
         log(f"[上傳] CSV 共 {save_history(rows)} 筆")
