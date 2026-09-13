@@ -1,6 +1,6 @@
 import argparse
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from zoneinfo import ZoneInfo
 
 import requests
@@ -334,6 +334,9 @@ def get_twse_institution(target):
         ).strip()
 
         try:
+            # 每一列各自先四捨五入到小數兩位再累加。
+            # 自營商在 BFI82U 分「自行買賣」與「避險」兩列，
+            # 先加總再進位會與券商／期貨商日報差 0.01。
             net = (
                 clean_decimal(
                     row[-1]
@@ -341,6 +344,9 @@ def get_twse_institution(target):
                 / Decimal(
                     "100000000"
                 )
+            ).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
             )
         except Exception:
             continue
