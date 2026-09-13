@@ -10,10 +10,14 @@ on:
       chart:
         description: "要產生的圖表"
         type: choice
-        options: [all, foreign, mtx]
+        options: [all, foreign, dealer, mtx, tmf, margin]
         default: all
       dry_run:
         description: "只上傳不推播 LINE"
+        type: boolean
+        default: false
+      force:
+        description: "忽略記號檔，強制重推"
         type: boolean
         default: false
       max_fetch:
@@ -21,9 +25,13 @@ on:
         required: false
         default: ""
 
-  # 回補完成、測試穩定後再打開這段
-  # schedule:
-  #   - cron: "10 12 * * 1-5"   # 台北時間 20:10
+  schedule:
+    # 下午分四次嘗試（台北時間）。資料未更新時程式會自行略過，
+    # 推播成功後寫記號檔，同一天不會重複推。
+    - cron: "5 9 * * 1-5"     # 17:05
+    - cron: "5 10 * * 1-5"    # 18:05
+    - cron: "5 11 * * 1-5"    # 19:05
+    - cron: "10 12 * * 1-5"   # 20:10（保底）
 
 jobs:
   chart:
@@ -42,7 +50,8 @@ jobs:
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           FONT_DIR: ${{ runner.temp }}
         run: |
-          ARGS="--chart ${{ inputs.chart }}"
+          # 排程觸發時 inputs 為空，chart 要有預設值，否則 argparse 會失敗
+          ARGS="--chart ${{ inputs.chart || 'all' }}"
           if [ -n "${{ inputs.market_date }}" ]; then
             ARGS="$ARGS --date ${{ inputs.market_date }}"
           fi
@@ -51,6 +60,9 @@ jobs:
           fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
+          fi
+          if [ "${{ inputs.force }}" = "true" ]; then
+            ARGS="$ARGS --force"
           fi
           echo "執行：python charts.py $ARGS"
           python charts.py $ARGS
