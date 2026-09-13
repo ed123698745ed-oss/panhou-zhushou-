@@ -426,8 +426,11 @@ def _base(ax_i, ax_b, f_reg, dates, idx, L_LO, L_HI, n):
     ax_i.set_axisbelow(True)
     ax_i.yaxis.set_major_locator(MultipleLocator((L_HI - L_LO) / 10))
     ax_i.grid(axis="y", color=C_GRID, linewidth=0.9, zorder=0)
+    # 指數線與柱子的高度範圍常重疊，加白色外框把線提到上層
+    import matplotlib.patheffects as pe
     ax_i.plot(range(n), idx, color=C_LINE, linewidth=1.9, zorder=3,
-              solid_joinstyle="round", solid_capstyle="round")
+              solid_joinstyle="round", solid_capstyle="round",
+              path_effects=[pe.withStroke(linewidth=4.6, foreground="white"), pe.Normal()])
     _style_axes(ax_i, ax_b, f_reg, dates, n)
 
 
@@ -509,7 +512,7 @@ def draw_ratio(rows, title, values, long_key, short_key, source):
 
 
 # ---------------- 型態三：存量（融資餘額，柱狀，比照永豐） ----------------
-C_LEVEL = "#E0AE45"
+C_LEVEL = "#EBC682"      # 柱子刻意調淡，讓指數線能壓在上層
 
 
 def level_axis(lo, hi):
@@ -549,7 +552,7 @@ def draw_level(rows, title, key, source, lagged=False):
     ax_b.set_yticks([R_LO + i * step for i in range(11)])
     ax_b.set_yticklabels([f"{R_LO + i * step:,.0f}" for i in range(11)])
     _base(ax_i, ax_b, f_reg, dates, idx, L_LO, L_HI, n)
-    ax_i.lines[-1].set_linewidth(2.2)          # 指數線加粗，避免被柱子吃掉
+    ax_i.lines[-1].set_linewidth(2.3)          # 融資這張柱子最密，線再粗一點
 
     _header(fig, title, f"{val[-1]:,.1f}", C_TITLE, 0.862, 0.920, f_bold)
     if lagged:
