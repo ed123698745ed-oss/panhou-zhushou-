@@ -18,38 +18,6 @@ HEADERS = {
 
 
 # ============================================================
-# 固定驗收資料
-# ============================================================
-
-VALIDATION_FIXTURES = {
-    date(2026, 9, 10): {
-        "index": Decimal("46940.49"),
-        "change": Decimal("-242.87"),
-        "percent": Decimal("-0.51"),
-
-        # 專案指定口徑
-        "turnover": Decimal("7140"),
-
-        "institution_total": Decimal("-503.12"),
-        "foreign": Decimal("-383.34"),
-        "trust": Decimal("17.86"),
-        "dealer": Decimal("-137.64"),
-
-        "foreign_tx_oi": -83918,
-        "previous_foreign_tx_oi": -81066,
-
-        "mtx_market_oi": 36259,
-        "mtx_inst_long": 5283,
-        "mtx_inst_short": 7361,
-
-        "tmf_market_oi": 97498,
-        "tmf_inst_long": 20854,
-        "tmf_inst_short": 55646,
-    }
-}
-
-
-# ============================================================
 # 共用
 # ============================================================
 
@@ -868,142 +836,6 @@ def get_live_retail_data(
 
 
 # ============================================================
-# Fixture
-# ============================================================
-
-def get_fixture_market_data(
-    target,
-):
-    fixture = (
-        VALIDATION_FIXTURES[
-            target
-        ]
-    )
-
-    mtx = calc_retail_oi(
-        fixture[
-            "mtx_market_oi"
-        ],
-        fixture[
-            "mtx_inst_long"
-        ],
-        fixture[
-            "mtx_inst_short"
-        ],
-    )
-
-    tmf = calc_retail_oi(
-        fixture[
-            "tmf_market_oi"
-        ],
-        fixture[
-            "tmf_inst_long"
-        ],
-        fixture[
-            "tmf_inst_short"
-        ],
-    )
-
-    return {
-        "date": target,
-
-        "index":
-            fixture["index"],
-
-        "change":
-            fixture["change"],
-
-        "percent":
-            fixture["percent"],
-
-        "turnover":
-            fixture["turnover"],
-
-        "institution_total":
-            fixture[
-                "institution_total"
-            ],
-
-        "foreign":
-            fixture["foreign"],
-
-        "trust":
-            fixture["trust"],
-
-        "dealer":
-            fixture["dealer"],
-
-        "foreign_tx_oi":
-            fixture[
-                "foreign_tx_oi"
-            ],
-
-        "previous_foreign_tx_oi":
-            fixture[
-                "previous_foreign_tx_oi"
-            ],
-
-        "foreign_tx_oi_change":
-            fixture[
-                "foreign_tx_oi"
-            ]
-            - fixture[
-                "previous_foreign_tx_oi"
-            ],
-
-        "mtx_market_oi":
-            fixture[
-                "mtx_market_oi"
-            ],
-
-        "mtx_retail_long":
-            mtx[
-                "retail_long"
-            ],
-
-        "mtx_retail_short":
-            mtx[
-                "retail_short"
-            ],
-
-        "mtx_retail_net":
-            mtx[
-                "retail_net"
-            ],
-
-        "mtx_retail_ratio":
-            mtx[
-                "ratio"
-            ],
-
-        "tmf_market_oi":
-            fixture[
-                "tmf_market_oi"
-            ],
-
-        "tmf_retail_long":
-            tmf[
-                "retail_long"
-            ],
-
-        "tmf_retail_short":
-            tmf[
-                "retail_short"
-            ],
-
-        "tmf_retail_net":
-            tmf[
-                "retail_net"
-            ],
-
-        "tmf_retail_ratio":
-            tmf[
-                "ratio"
-            ],
-    }
-
-
-# ============================================================
 # Live market
 # ============================================================
 
@@ -1101,18 +933,7 @@ def get_live_market_data(
 
 
 def get_market_data(target):
-    if target in VALIDATION_FIXTURES:
-        return (
-            get_fixture_market_data(
-                target
-            )
-        )
-
-    return (
-        get_live_market_data(
-            target
-        )
-    )
+    return get_live_market_data(target)
 
 
 # ============================================================
