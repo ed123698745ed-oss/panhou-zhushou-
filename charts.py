@@ -26,6 +26,7 @@ import requests
 OWNER, REPO, BRANCH = "ed123698745ed-oss", "panhou-charts", "main"
 WINDOW = 80
 CSV_PATH = "data/market_data.csv"
+SENTINEL = "data/last_push.txt"   # 記錄最後推播的交易日，避免重複推播
 
 FONT_REG = "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/SubsetOTF/TC/NotoSansTC-Regular.otf"
 FONT_BOLD = "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/SubsetOTF/TC/NotoSansTC-Bold.otf"
@@ -615,6 +616,8 @@ def main():
     ap.add_argument("--chart", default="all",
                     help="foreign / dealer / mtx / tmf / margin / all（可逗號分隔）")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--force", action="store_true",
+                    help="忽略記號檔，強制重推")
     ap.add_argument("--max-fetch", type=int, default=None,
                     help="本次最多補幾天（回補分批用）")
     a = ap.parse_args()
@@ -632,6 +635,16 @@ def main():
 
     window = ensure_history(end, need_taifex, need_margin, a.max_fetch)
     d = window[-1]["date"]
+
+    # 排程會在下午分多次嘗試。若資料尚未更新，最後交易日仍是昨天，
+    # 這裡擋下來，避免把昨天的圖再推一次；假日同理。
+    if not (a.dry_run or a.force):
+        last = (gh_get_text(SENTINEL) or "").strip()
+        if last == d:
+            log(f"[略過] {d} 已於稍早推播過，本次不重複推播")
+            return
+        if last:
+            log(f"[記號] 上次推播 {last}，本次目標 {d}")
 
     for c in charts:
         srcs = CHART_NEEDS[c]
@@ -674,6 +687,7 @@ def main():
         log("[dry-run] 跳過 LINE 推播")
     else:
         line_push_images(urls)
+        gh_put(SENTINEL, d.encode("utf-8"), f"pushed {d}")
     log("[完成]")
 
 
