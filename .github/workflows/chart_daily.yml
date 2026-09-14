@@ -26,12 +26,19 @@ on:
         default: ""
 
   schedule:
-    # 下午分四次嘗試（台北時間）。資料未更新時程式會自行略過，
-    # 推播成功後寫記號檔，同一天不會重複推。
-    - cron: "5 9 * * 1-5"     # 17:05
-    - cron: "5 10 * * 1-5"    # 18:05
-    - cron: "5 11 * * 1-5"    # 19:05
-    - cron: "10 12 * * 1-5"   # 20:10（保底）
+    # 下午分四次嘗試（台北時間）。避開整點的 GitHub Actions 排程尖峰。
+    # 資料未更新時程式會自行略過；成功後同一天不會重複推播。
+    - cron: "17 9 * * 1-5"    # 17:17
+    - cron: "27 10 * * 1-5"   # 18:27
+    - cron: "37 11 * * 1-5"   # 19:37
+    - cron: "47 12 * * 1-5"   # 20:47（保底）
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chart-daily
+  cancel-in-progress: false
 
 jobs:
   chart:
