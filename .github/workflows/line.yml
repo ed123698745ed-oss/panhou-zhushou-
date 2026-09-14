@@ -7,14 +7,17 @@ on:
         description: "交易日 YYYY-MM-DD（留空則為今天）"
         required: false
         type: string
-
   schedule:
-    # 週一到週五 台北時間 20:00（= UTC 12:00）
-    - cron: "0 12 * * 1-5"
+    # 週一到週五台北時間 20:17（= UTC 12:17），避開 GitHub 整點排程壅塞
+    - cron: "17 12 * * 1-5"
+
+permissions:
+  contents: read
 
 jobs:
   market-data:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Checkout repository
@@ -31,11 +34,48 @@ jobs:
       - name: Fetch and push to LINE
         shell: bash
         env:
+          MARKET_DATE: ${{ inputs.market_date }}
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
         run: |
-          if [ -n "${{ inputs.market_date }}" ]; then
-            python send_line.py --date "${{ inputs.market_date }}"
+          if [ -n "$MARKET_DATE" ]; then
+            python send_line.py --date "$MARKET_DATE"
           else
             python send_line.py
           fi
+
+      - name: Notify LINE on failure
+        if: ${{ failure() }}
+        env:
+          MARKET_DATE: ${{ inputs.market_date }}
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+          from datetime import datetime, timedelta, timezone
+
+          market_date = os.environ.get("MARKET_DATE") or datetime.now(
+              timezone(timedelta(hours=8))
+          ).date().isoformat()
+          payload = {
+              "to": os.environ["LINE_USER_ID"],
+              "messages": [{
+                  "type": "text",
+                  "text": f"【盤後駐守失敗｜{market_date}】\n市場資料或 LINE 推播執行失敗，請查看 GitHub Actions：Market Data Test。",
+              }],
+          }
+          request = urllib.request.Request(
+              "https://api.line.me/v2/bot/message/push",
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                  "Authorization": f"Bearer {os.environ['LINE_CHANNEL_ACCESS_TOKEN']}",
+                  "Content-Type": "application/json",
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              print(f"Failure notification LINE status: {response.status}")
+          PY
