@@ -50,6 +50,11 @@ jobs:
       - name: 安裝套件
         run: pip install matplotlib requests beautifulsoup4
 
+      - name: 錯開期交所請求
+        # 18:30／20:30 外部觸發會同時啟動文字推播與圖表，兩支同時打期交所曾導致逾時（2026-10-28）
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.market_date == '' }}
+        run: sleep 60
+
       - name: 產生並推播圖表
         env:
           CHARTS_TOKEN: ${{ secrets.CHARTS_TOKEN }}
@@ -73,3 +78,40 @@ jobs:
           fi
           echo "執行：python charts.py $ARGS"
           python charts.py $ARGS
+
+      - name: Notify LINE on failure
+        if: ${{ failure() && !inputs.dry_run }}
+        env:
+          MARKET_DATE: ${{ inputs.market_date }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+          from datetime import datetime, timedelta, timezone
+
+          market_date = os.environ.get("MARKET_DATE") or datetime.now(
+              timezone(timedelta(hours=8))
+          ).date().isoformat()
+          payload = {
+              "to": os.environ["LINE_USER_ID"],
+              "messages": [{
+                  "type": "text",
+                  "text": f"【盤後駐守圖表失敗｜{market_date}】\n圖表產生或推播失敗，稍後排程會再試；請查看 GitHub Actions：Chart Daily。\n{os.environ['RUN_URL']}",
+              }],
+          }
+          request = urllib.request.Request(
+              "https://api.line.me/v2/bot/message/push",
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                  "Authorization": f"Bearer {os.environ['LINE_CHANNEL_ACCESS_TOKEN']}",
+                  "Content-Type": "application/json",
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              print(f"Failure notification LINE status: {response.status}")
+          PY

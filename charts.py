@@ -143,19 +143,27 @@ def _patch_fmd(fmd, gap=1.6):
     orig = fmd.request_get
 
     def wrapped(url, params=None):
+        last = None
         for attempt in range(6):
             time.sleep(gap)
             try:
                 return orig(url, params=params)
             except requests.HTTPError as e:
                 code = getattr(e.response, "status_code", 0)
-                if code == 429:
+                if code == 429 or code >= 500:
                     wait = 30 * (attempt + 1)
-                    log(f"    [429] 期交所限流，等 {wait}s 重試（第 {attempt+1} 次）")
+                    log(f"    [{code}] 期交所限流或忙碌，等 {wait}s 重試（第 {attempt+1} 次）")
+                    last = e
                     time.sleep(wait)
                     continue
                 raise
-        raise RuntimeError("期交所連續回 429，本次放棄")
+            except (requests.Timeout, requests.ConnectionError) as e:
+                # 2026-10-28：期交所 ReadTimeout 一次就讓整支圖表中止，改為退讓重試
+                wait = 20 * (attempt + 1)
+                log(f"    [逾時/連線] {type(e).__name__}，等 {wait}s 重試（第 {attempt+1} 次）")
+                last = e
+                time.sleep(wait)
+        raise RuntimeError(f"期交所連續 6 次失敗，本次放棄：{type(last).__name__}: {last}")
 
     fmd.request_get = wrapped
     _FMD_PATCHED = True

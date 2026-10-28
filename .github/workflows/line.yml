@@ -7,6 +7,14 @@ on:
         description: "交易日 YYYY-MM-DD（留空則為今天）"
         required: false
         type: string
+      dry_run:
+        description: "只印出不推播 LINE"
+        type: boolean
+        default: false
+      force:
+        description: "忽略已推播記號，強制重推"
+        type: boolean
+        default: false
   schedule:
     # 週一到週五台北時間 20:17（= UTC 12:17），避開 GitHub 整點排程壅塞
     - cron: "17 12 * * 1-5"
@@ -35,17 +43,21 @@ jobs:
         shell: bash
         env:
           MARKET_DATE: ${{ inputs.market_date }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          FORCE: ${{ inputs.force }}
+          CHARTS_TOKEN: ${{ secrets.CHARTS_TOKEN }}
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
         run: |
-          if [ -n "$MARKET_DATE" ]; then
-            python send_line.py --date "$MARKET_DATE"
-          else
-            python send_line.py
-          fi
+          ARGS=""
+          if [ -n "$MARKET_DATE" ]; then ARGS="$ARGS --date $MARKET_DATE"; fi
+          if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ "$FORCE" = "true" ]; then ARGS="$ARGS --force"; fi
+          echo "執行：python send_line.py$ARGS"
+          python send_line.py $ARGS
 
       - name: Notify LINE on failure
-        if: ${{ failure() }}
+        if: ${{ failure() && !inputs.dry_run }}
         env:
           MARKET_DATE: ${{ inputs.market_date }}
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
