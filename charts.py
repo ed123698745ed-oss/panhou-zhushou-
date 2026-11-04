@@ -193,9 +193,24 @@ def gh_headers():
             "Accept": "application/vnd.github+json"}
 
 
+def gh_call(method, url, **kw):
+    """GitHub API 呼叫：5xx、429、逾時與連線錯誤退讓重試（2026-11-04 記號寫入回 502 事故）。"""
+    last = None
+    for k in range(4):
+        try:
+            r = S.request(method, url, headers=gh_headers(), **kw)
+            if r.status_code < 500 and r.status_code != 429:
+                return r
+            last = f"HTTP {r.status_code}: {r.text[:200]}"
+        except requests.RequestException as e:
+            last = f"{type(e).__name__}: {e}"
+        log(f"  GitHub {method} 第 {k + 1} 次失敗（{last}），稍後重試")
+        time.sleep(5 * 2 ** k)
+    raise RuntimeError(f"GitHub {method} {url} 重試 4 次仍失敗：{last}")
+
+
 def gh_get_text(path):
-    r = S.get(f"https://api.github.com/repos/{OWNER}/{REPO}/contents/{path}?ref={BRANCH}",
-              headers=gh_headers(), timeout=30)
+    r = gh_call("GET", f"https://api.github.com/repos/{OWNER}/{REPO}/contents/{path}?ref={BRANCH}", timeout=30)
     if r.status_code == 404:
         return None
     r.raise_for_status()
@@ -204,12 +219,10 @@ def gh_get_text(path):
 
 def gh_put(path, data: bytes, message):
     body = {"message": message, "content": base64.b64encode(data).decode(), "branch": BRANCH}
-    r = S.get(f"https://api.github.com/repos/{OWNER}/{REPO}/contents/{path}?ref={BRANCH}",
-              headers=gh_headers(), timeout=30)
+    r = gh_call("GET", f"https://api.github.com/repos/{OWNER}/{REPO}/contents/{path}?ref={BRANCH}", timeout=30)
     if r.status_code == 200:
         body["sha"] = r.json()["sha"]
-    r = S.put(f"https://api.github.com/repos/{OWNER}/{REPO}/contents/{path}",
-              headers=gh_headers(), json=body, timeout=60)
+    r = gh_call("PUT", f"https://api.github.com/repos/{OWNER}/{REPO}/contents/{path}", json=body, timeout=60)
     if r.status_code not in (200, 201):
         raise RuntimeError(f"上傳 {path} 失敗 {r.status_code}: {r.text[:300]}")
     return f"https://raw.githubusercontent.com/{OWNER}/{REPO}/{BRANCH}/{path}"
@@ -695,7 +708,12 @@ def main():
         log("[dry-run] 跳過 LINE 推播")
     else:
         line_push_images(urls)
-        gh_put(SENTINEL, d.encode("utf-8"), f"pushed {d}")
+        # LINE 已送出：之後任何失敗都不能讓通知寫成「推播失敗」，也要讓人知道記號沒寫入可能重推
+        open("pushed_ok.flag", "w").write(d)
+        try:
+            gh_put(SENTINEL, d.encode("utf-8"), f"pushed {d}")
+        except Exception as e:
+            raise SystemExit(f"[記號失敗] {d} 圖表已推播成功，但寫入 {SENTINEL} 失敗：{e}")
     log("[完成]")
 
 
