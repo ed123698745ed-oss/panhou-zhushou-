@@ -96,11 +96,16 @@ jobs:
           market_date = os.environ.get("MARKET_DATE") or datetime.now(
               timezone(timedelta(hours=8))
           ).date().isoformat()
+          if os.path.exists("pushed_ok.flag"):
+              text = (f"【盤後駐守圖表｜{market_date}】\n圖表已推播成功，但「已推播」記號寫入失敗，"
+                      f"之後的排程可能重複推播同一批圖；請 Emit 補寫記號。\n{os.environ['RUN_URL']}")
+          else:
+              text = f"【盤後駐守圖表失敗｜{market_date}】\n圖表產生或推播失敗，稍後排程會再試；請查看 GitHub Actions：Chart Daily。\n{os.environ['RUN_URL']}"
           payload = {
               "to": os.environ["LINE_USER_ID"],
               "messages": [{
                   "type": "text",
-                  "text": f"【盤後駐守圖表失敗｜{market_date}】\n圖表產生或推播失敗，稍後排程會再試；請查看 GitHub Actions：Chart Daily。\n{os.environ['RUN_URL']}",
+                  "text": text,
               }],
           }
           request = urllib.request.Request(
