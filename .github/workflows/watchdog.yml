@@ -1,0 +1,40 @@
+name: Push Watchdog
+
+# 獨立檢查當天盤後駐守文字與圖表是否已推播；沒推就發 LINE 警示（2026-11-05 事故 20）。
+# 主要由 cron-job.org 於台北 21:40 以 workflow_dispatch 觸發；GitHub schedule 只當備援。
+on:
+  workflow_dispatch:
+    inputs:
+      check_date:
+        description: "檢查日期 YYYY-MM-DD（留空=今天）"
+        required: false
+        default: ""
+      dry_run:
+        description: "只印出不推播 LINE"
+        type: boolean
+        default: false
+  schedule:
+    - cron: "53 13 * * 1-5"   # 台北 21:53（備援）
+
+permissions:
+  contents: read
+
+concurrency:
+  group: push-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install requests
+      - name: 檢查推播記號
+        env:
+          CHECK_DATE: ${{ inputs.check_date }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          CHARTS_TOKEN: ${{ secrets.CHARTS_TOKEN }}
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: python watchdog.py
